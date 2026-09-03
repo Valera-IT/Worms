@@ -1,0 +1,698 @@
+using UnityEngine;
+
+public class Worm : MonoBehaviour
+{
+    public Team Team;
+    public string WormName = "Worm";
+    public float Health = 100f;
+    public bool IsDead { get; private set; }
+
+    public float AimAngle = 30f;   // градусы относительно горизонта
+    public int Facing = 1;         // 1 вправо, -1 влево
+
+    const float MoveSpeed = 4.2f;
+    // Прыжок вдвое: высота и дальность выросли в два раза, а не скорость — при
+    // гравитации высота идёт от квадрата скорости, так что удвоенный импульс дал
+    // бы прыжок вчетверо и червь улетал бы за верх карты.
+    const float JumpX = 7.1f;
+    const float JumpY = 13.4f;
+
+    Rigidbody2D _rb;
+    CircleCollider2D _col;
+    Transform _art;               // тело и черты вместе — их и разворачиваем по Facing
+    SpriteRenderer _body;
+    SpriteRenderer _face;
+    Transform _crosshair;
+    SpriteRenderer _crossSr;
+
+    float _charge;
+    bool _charging;
+    bool _hasFiredThisTurn;
+    int _burstLeft;               // остаток выстрелов дробовика на этот ход
+    float _airTime;
+    float _pushTime;              // сколько червь подряд толкается вбок, для захода на склон
+    float _stepTimer;
+    float _drownTimer;            // сколько червь уже под водой: тонет не мгновенно
+    float _bubbleTimer;
+    int _lastWeapon = -1;
+    Rope _rope;
+    int _gen;
+
+    public bool IsActive => GameManager.I != null && GameManager.I.ActiveWorm == this;
+    public Vector2 Velocity => _rb != null ? _rb.linearVelocity : Vector2.zero;
+    public float Charge => _charge;
+    public bool IsCharging => _charging;
+
+    /// Верёвка червя, если она уже создана. Ищем компонент, а не полагаемся на
+    /// поле: верёвку может завести и не сам червь (телепорт, тесты, потом бот),
+    /// и тогда два источника правды разошлись бы.
+    Rope RopeTool => _rope != null ? _rope : (_rope = GetComponent<Rope>());
+
+    /// Червь висит на верёвке: ходьба и прыжок с земли на это время отключены.
+    public bool Roped { get { var r = RopeTool; return r != null && r.Attached; } }
+
+    public static Worm Spawn(Team team, string name, Vector2 pos)
+    {
+        var go = new GameObject("Worm_" + name);
+        GameManager.Attach(go);
+        go.transform.position = pos;
+
+        var w = go.AddComponent<Worm>();
+        w._gen = GameManager.I.Generation;
+        w.Team = team;
+        w.WormName = name;
+
+        var art = new GameObject("Art").transform;
+        art.SetParent(go.transform, false);
+        w._art = art;
+
+        // Тело красится в цвет команды, черты (контур, глаза, рот) — нет:
+        // иначе обводка червя тонула бы в цвете команды.
+        w._body = Sprites.Make("Body", WormSprite.Body, team.Color, 10, art);
+        w._face = Sprites.Make("Face", WormSprite.Face, Color.white, 11, art);
+
+        var col = go.AddComponent<CircleCollider2D>();
+        col.radius = 0.5f;
+        col.sharedMaterial = new PhysicsMaterial2D("WormMat") { friction = 0.35f, bounciness = 0f };
+        w._col = col;
+
+        var rb = go.AddComponent<Rigidbody2D>();
+        rb.freezeRotation = true;
+        rb.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
+        rb.interpolation = RigidbodyInterpolation2D.Interpolate;
+        w._rb = rb;
+
+        var cross = Sprites.Make("Crosshair", Sprites.Circle, new Color(1f, 1f, 1f, 0.85f), 12, go.transform);
+        cross.transform.localScale = Vector3.one * 0.3f;
+        w._crosshair = cross.transform;
+        w._crossSr = cross;
+
+        return w;
+    }
+
+    public void BeginTurn()
+    {
+        _hasFiredThisTurn = false;
+        _burstLeft = 0;
+        _charge = 0f;
+        _charging = false;
+        _lastWeapon = GameManager.I != null ? GameManager.I.SelectedWeapon : -1;
+        ReleaseRope();
+    }
+
+    /// Отцепить верёвку. Зовётся на старте хода, при его завершении и при смерти —
+    /// висеть на ней, пока ходит соперник, было бы странно.
+    public void ReleaseRope()
+    {
+        var r = RopeTool;
+        if (r != null) r.Release();
+    }
+
+    static readonly RaycastHit2D[] _groundHits = new RaycastHit2D[8];
+    static readonly ContactFilter2D _groundFilter = MakeGroundFilter();
+
+    static ContactFilter2D MakeGroundFilter()
+    {
+        var f = new ContactFilter2D();
+        f = f.NoFilter();
+        f.useTriggers = false;
+        return f;
+    }
+
+    public bool Grounded
+    {
+        get
+        {
+            // queriesStartInColliders включён, поэтому луч, пущенный из центра червя,
+            // первым же попадает в его собственный коллайдер на нулевой дистанции.
+            // Одиночный CircleCast возвращал только это попадание — червь никогда не
+            // считался стоящим на земле. Поэтому берём весь список и пропускаем себя.
+            int n = Physics2D.CircleCast(transform.position, _col.radius * 0.92f, Vector2.down,
+                                         _groundFilter, _groundHits, 0.18f);
+            for (int i = 0; i < n; i++)
+            {
+                var c = _groundHits[i].collider;
+                if (c != null && c.gameObject != gameObject) return true;
+            }
+            return false;
+        }
+    }
+
+    void Update()
+    {
+        if (GameManager.I == null || GameManager.I.Generation != _gen) return;
+
+        // В отходе червь тоже слушает ввод: ходит, прыгает и бежит прятаться.
+        // Стрелять он там уже не может — этому мешает _hasFiredThisTurn ниже.
+        var state = GameManager.I.State;
+        bool active = IsActive && !IsDead && (state == GameState.Aim || state == GameState.Retreat);
+        // Прицел в отходе убираем: он обещал бы выстрел, которого не будет.
+        _crossSr.enabled = active && !_hasFiredThisTurn;
+
+        if (active) HandleInput();
+
+        // Прицел рисуем всегда для активного червя.
+        var dir = AimDirection;
+        _crosshair.localPosition = dir * 2.2f;
+        // Червь смотрит туда же, куда целится: зеркалим весь спрайт целиком.
+        _art.localScale = new Vector3(Facing, 1f, 1f);
+
+        Drowning();
+
+        if (!Grounded) _airTime += Time.deltaTime; else _airTime = 0f;
+
+        Steps(active);
+    }
+
+    /// Шаги слышны только у того червя, кем ходят: шорох чужого тела,
+    /// съезжающего по склону после взрыва, звучал бы как чьи-то шаги.
+    void Steps(bool active)
+    {
+        if (!active || Roped || _airTime > 0.05f || Mathf.Abs(Velocity.x) < 0.8f)
+        {
+            _stepTimer = 0f;
+            return;
+        }
+
+        _stepTimer -= Time.deltaTime;
+        if (_stepTimer > 0f) return;
+        _stepTimer = 0.26f;
+        Sfx.Step();
+    }
+
+    /// Под водой червь тонет: здоровье уходит за пару секунд, вокруг идут
+    /// пузыри. Раньше вода убивала мгновенно — при потопе, который поднимается
+    /// каждый ход, это лишало шанса вылезти на берег в свой ход.
+    void Drowning()
+    {
+        if (IsDead) return;
+
+        float level = DestructibleTerrain.WaterLevel;
+        if (transform.position.y >= level - 0.1f) { _drownTimer = 0f; return; }
+
+        if (_drownTimer <= 0f)
+        {
+            Fx.Splash(new Vector2(transform.position.x, level));
+            Sfx.Splash();
+        }
+        _drownTimer += Time.deltaTime;
+
+        // Вода вязкая: червь идёт ко дну ровно, а не летит по инерции.
+        if (_rb != null && _rb.simulated)
+            _rb.linearVelocity = Vector2.Lerp(_rb.linearVelocity, new Vector2(0f, -2.2f), 6f * Time.deltaTime);
+
+        _bubbleTimer -= Time.deltaTime;
+        if (_bubbleTimer <= 0f)
+        {
+            _bubbleTimer = 0.28f;
+            Fx.Bubbles(transform.position, 3);
+        }
+
+        // Урон от воды никому не записываем: это не чей-то выстрел.
+        Health -= DrownRate * Time.deltaTime;
+        if (Health <= 0f)
+        {
+            Health = 0f;
+            Die(true);
+        }
+    }
+
+    public Vector2 AimDirection
+    {
+        get
+        {
+            float a = AimAngle * Mathf.Deg2Rad;
+            return new Vector2(Mathf.Cos(a) * Facing, Mathf.Sin(a));
+        }
+    }
+
+    /// Кто ведёт этого червя: команда бота приносит свою реализацию,
+    /// у живого игрока это роутер клавиатуры, геймпада и касаний.
+    public IGameInput Controls => Team != null && Team.Controller != null ? Team.Controller : GameInput.Player;
+
+    void HandleInput()
+    {
+        var input = Controls;
+        if (input == null) return;
+
+        float h = Mathf.Clamp(input.Move, -1f, 1f);
+        if (Mathf.Abs(h) > 0.01f) Facing = h > 0 ? 1 : -1;
+
+        bool roped = Roped;
+        bool grounded = !roped && Grounded;
+
+        if (roped)
+        {
+            // На весу ввод уходит верёвке целиком: вбок — раскачка, вверх-вниз —
+            // длина, прыжок — отцеп. Прицел там же не покрутить, и это честно:
+            // одни и те же оси не могут значить два разных дела сразу.
+            RopeTool.Control(input);
+        }
+        else
+        {
+            if (grounded && !_charging)
+            {
+                var v = _rb.linearVelocity;
+                bool pushing = Mathf.Abs(h) > 0.01f;
+                _pushTime = pushing ? _pushTime + Time.deltaTime : 0f;
+
+                // Подъём на склон даём только когда червь действительно упёрся:
+                // раньше он подпрыгивал на каждом шаге и по ровному месту шёл
+                // в полёте, где ввод уже не действует — ходьба от этого залипала.
+                bool blocked = _pushTime > 0.08f && Mathf.Abs(v.x) < MoveSpeed * 0.35f;
+                v.x = h * MoveSpeed;
+                if (blocked && Mathf.Abs(v.y) < 0.2f) v.y = Mathf.Max(v.y, 0.6f);
+                _rb.linearVelocity = v;
+            }
+            else _pushTime = 0f;
+
+            // Прицеливание: клавиши и стик крутят угол, палец и бот задают точку.
+            if (input.HasAimTarget)
+            {
+                Vector2 d = input.AimTarget - (Vector2)transform.position;
+                if (d.sqrMagnitude > 0.09f)
+                {
+                    Facing = d.x >= 0f ? 1 : -1;
+                    AimAngle = Mathf.Clamp(Mathf.Atan2(d.y, Mathf.Abs(d.x)) * Mathf.Rad2Deg, -85f, 85f);
+                }
+            }
+            else if (Mathf.Abs(input.AimAxis) > 0.01f)
+            {
+                AimAngle = Mathf.Clamp(AimAngle + input.AimAxis * 75f * Time.deltaTime, -85f, 85f);
+            }
+
+            if (grounded && input.JumpPressed)
+            {
+                _rb.linearVelocity = new Vector2(Facing * JumpX, JumpY);
+                Sfx.Jump();
+            }
+        }
+
+        // Пока дробовик не отстрелял очередь, оружие не переключить: оба выстрела
+        // уходят из одного ствола.
+        if (_burstLeft == 0)
+        {
+            if (input.WeaponRequest >= 0) GameManager.I.SelectWeapon(input.WeaponRequest);
+            if (input.WeaponCycle != 0) GameManager.I.CycleWeapon(input.WeaponCycle);
+        }
+
+        // Смена оружия посреди набора силы сбрасывает набор: иначе полоса силы
+        // оставалась висеть, а следующий выстрел уходил с чужим зарядом.
+        if (GameManager.I.SelectedWeapon != _lastWeapon)
+        {
+            _lastWeapon = GameManager.I.SelectedWeapon;
+            _charging = false;
+            _charge = 0f;
+        }
+
+        if (_hasFiredThisTurn) return;
+
+        var weapon = GameManager.I.CurrentWeapon;
+
+        switch (weapon.Use)
+        {
+            // Верёвка бросается мгновенно и ход не заканчивает.
+            case WeaponUse.Rope:
+                if (input.FirePressed) ThrowRope(weapon);
+                return;
+
+            case WeaponUse.Hitscan:
+                if (input.FirePressed) FireHitscan(weapon);
+                return;
+
+            case WeaponUse.Melee:
+                if (input.FirePressed) Strike(weapon);
+                return;
+
+            case WeaponUse.Drop:
+                if (input.FirePressed) DropItem(weapon);
+                return;
+
+            case WeaponUse.Strike:
+                if (input.FirePressed) CallAirStrike(weapon);
+                return;
+        }
+
+        if (input.FirePressed) { _charging = true; _charge = 0f; }
+
+        if (_charging)
+        {
+            _charge = Mathf.Min(1f, _charge + Time.deltaTime / 1.15f);
+            if (input.FireReleased || !input.FireHeld || _charge >= 1f)
+            {
+                // Телепорт использует ту же полосу силы, только не как скорость снаряда,
+                // а как дальность прыжка — отдельного режима выбора точки не нужно.
+                if (weapon.Use == WeaponUse.Teleport) DoTeleport(weapon);
+                else FireProjectile(weapon);
+            }
+        }
+    }
+
+    /// Бросок верёвки. Промах патрон не тратит: гарпун просто ушёл в небо.
+    void ThrowRope(Weapon w)
+    {
+        if (Roped) { ReleaseRope(); return; }
+
+        _rope = Rope.Of(this);
+        if (!_rope.Throw(AimDirection)) return;
+
+        GameManager.I.ConsumeAmmo(w.Kind);
+    }
+
+    void DoTeleport(Weapon w)
+    {
+        _charging = false;
+
+        if (!Teleport.Jump(this, AimDirection, _charge))
+        {
+            // Точки не нашлось — патрон цел, ход продолжается.
+            Fx.FloatingText(transform.position + Vector3.up * 0.8f, "некуда", new Color(1f, 0.8f, 0.4f));
+            _charge = 0f;
+            return;
+        }
+
+        _hasFiredThisTurn = true;
+        _charge = 0f;
+        GameManager.I.ConsumeAmmo(w.Kind);
+        GameManager.I.EndTurnAfterUtility();
+    }
+
+    /// Перенос без физики: телепорт и отладка. Скорость гасим, иначе червь
+    /// прилетает в новую точку с прежним разгоном.
+    public void PlaceAt(Vector2 pos)
+    {
+        ReleaseRope();
+        _rb.linearVelocity = Vector2.zero;
+        _rb.position = pos;
+        transform.position = pos;
+    }
+
+    public void Heal(float amount)
+    {
+        if (IsDead || amount <= 0f) return;
+        Health = Mathf.Min(100f, Health + amount);
+    }
+
+    void FireProjectile(Weapon w)
+    {
+        _charging = false;
+        _hasFiredThisTurn = true;
+
+        Vector2 dir = AimDirection;
+        Vector2 pos = (Vector2)transform.position + dir * 0.95f;
+        float speed = w.LaunchSpeed * Mathf.Max(0.18f, _charge);
+
+        var shot = Projectile.Spawn(w, pos, dir * speed, this, 1f, w.Cluster);
+        if (w.Homing) shot.HomeTarget = HomingTarget(dir);
+        Sfx.Shot();
+
+        _rb.AddForce(-dir * 1.2f, ForceMode2D.Impulse);
+        GameManager.I.OnWeaponFired();
+        _charge = 0f;
+    }
+
+    /// Ближайший живой враг в стороне прицела: туда пойдёт самонаводящаяся ракета.
+    /// Цель выбирается на выстреле, а не каждый кадр — иначе ракета переключалась
+    /// бы между червями и вертелась на месте.
+    Vector2 HomingTarget(Vector2 dir)
+    {
+        var worms = GameManager.I.AllWorms();
+        Worm best = null;
+        float bestScore = float.MaxValue;
+        for (int i = 0; i < worms.Count; i++)
+        {
+            var w = worms[i];
+            if (w == null || w.IsDead || w == this || w.Team == Team) continue;
+            Vector2 d = (Vector2)w.transform.position - (Vector2)transform.position;
+            // Врагов позади прицела штрафуем, но не отбрасываем: иначе ракета
+            // без единой цели впереди просто улетала бы в небо.
+            float score = d.magnitude * (Vector2.Dot(d.normalized, dir) > 0f ? 1f : 3f);
+            if (score < bestScore) { bestScore = score; best = w; }
+        }
+        return best != null ? (Vector2)best.transform.position : (Vector2)transform.position + dir * 30f;
+    }
+
+    /// Мгновенное оружие двух повадок. Узи (AutoBurst) выпускает всю очередь одним
+    /// нажатием, но пулями подряд во времени — иначе пять лучей ушли бы в один кадр
+    /// по одной прямой. Дробовик бьёт по выстрелу за нажатие: между двумя выстрелами
+    /// червь стоит на месте с тем же стволом и может перецелиться, а ход кончается
+    /// только после последнего. Каждая пуля делает свою маленькую воронку.
+    void FireHitscan(Weapon w)
+    {
+        if (w.AutoBurst)
+        {
+            _hasFiredThisTurn = true;
+            StartCoroutine(AutoBurst(w));
+            return;
+        }
+
+        if (_burstLeft == 0) _burstLeft = Mathf.Max(1, w.Burst);
+
+        float spread = w.Spread > 0f ? Random.Range(-w.Spread, w.Spread) : 0f;
+        float a = (AimAngle + spread) * Mathf.Deg2Rad;
+        ShootRay(w, new Vector2(Mathf.Cos(a) * Facing, Mathf.Sin(a)), false);
+        Sfx.Shotgun();
+
+        if (--_burstLeft > 0) return;
+
+        _hasFiredThisTurn = true;
+        GameManager.I.OnWeaponFired();
+    }
+
+    /// Очередь узи: пули уходят одна за другой с короткой паузой, каждая — со своим
+    /// разбросом. Ход завершаем только когда отстреляны все.
+    System.Collections.IEnumerator AutoBurst(Weapon w)
+    {
+        int n = Mathf.Max(1, w.Burst);
+        for (int i = 0; i < n; i++)
+        {
+            if (GameManager.I == null || GameManager.I.Generation != _gen || IsDead) yield break;
+
+            float spread = w.Spread > 0f ? Random.Range(-w.Spread, w.Spread) : 0f;
+            float a = (AimAngle + spread) * Mathf.Deg2Rad;
+            ShootRay(w, new Vector2(Mathf.Cos(a) * Facing, Mathf.Sin(a)), true);
+            Sfx.Shotgun();
+            GameManager.I.Cam.Shake(0.12f);
+            yield return new WaitForSeconds(0.07f);
+        }
+
+        if (GameManager.I != null && GameManager.I.Generation == _gen)
+            GameManager.I.OnWeaponFired();
+    }
+
+    void ShootRay(Weapon w, Vector2 dir, bool soft)
+    {
+        Vector2 origin = (Vector2)transform.position + dir * 0.95f;
+
+        var hits = Physics2D.RaycastAll(origin, dir, 45f);
+        Vector2 point = origin + dir * 45f;
+        float best = float.MaxValue;
+        foreach (var hit in hits)
+        {
+            if (hit.collider.gameObject == gameObject) continue;
+            if (hit.distance < best) { best = hit.distance; point = hit.point; }
+        }
+
+        // Трассер
+        var tracer = Sprites.Make("Tracer", Sprites.Square, new Color(1f, 1f, 0.7f, 0.9f), 18, GameManager.Root);
+        float len = Vector2.Distance(origin, point);
+        tracer.transform.position = origin + dir * (len * 0.5f);
+        tracer.transform.rotation = Quaternion.Euler(0, 0, Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg);
+        tracer.transform.localScale = new Vector3(len, 0.08f, 1f);
+        Object.Destroy(tracer.gameObject, 0.12f);
+
+        Combat.Detonate(point, w.BlastRadius, w.Damage, soft);
+    }
+
+    /// Удар вплотную: кулак подбрасывает жертву вверх, бита отправляет её в полёт
+    /// вбок. Ландшафт трогает только кулак, и то едва.
+    void Strike(Weapon w)
+    {
+        _hasFiredThisTurn = true;
+        bool punch = w.Kind == WeaponKind.FirePunch;
+
+        Vector2 origin = (Vector2)transform.position + new Vector2(Facing * 0.9f, 0.1f);
+        var worms = GameManager.I.AllWorms();
+        int hit = 0;
+        for (int i = 0; i < worms.Count; i++)
+        {
+            var v = worms[i];
+            if (v == null || v.IsDead || v == this) continue;
+            Vector2 d = (Vector2)v.transform.position - origin;
+            if (d.magnitude > 1.7f || d.x * Facing < -0.4f) continue;
+
+            v.Knockback(punch ? new Vector2(Facing * 4f, 16f) : new Vector2(Facing * 20f, 7f));
+            v.TakeDamage(w.Damage);
+            hit++;
+        }
+
+        if (punch) Combat.Detonate(origin + new Vector2(Facing * 0.6f, 0f), w.BlastRadius, 0f);
+        Fx.Splash(origin, w.Color, 8, 0.25f);
+        Sfx.Shotgun();
+        if (hit == 0) Fx.FloatingText(transform.position + Vector3.up * 0.8f, "мимо", new Color(1f, 0.85f, 0.4f));
+
+        GameManager.I.OnWeaponFired();
+    }
+
+    /// Динамит, мина и овца кладутся под ноги. Мина остаётся на карте и после
+    /// хода, поэтому ходом её не ждут — остальное тикает как обычный снаряд.
+    void DropItem(Weapon w)
+    {
+        _hasFiredThisTurn = true;
+
+        Vector2 pos = (Vector2)transform.position + new Vector2(Facing * 0.6f, 0f);
+        if (w.Kind == WeaponKind.Mine)
+        {
+            Mine.Drop(w, pos);
+        }
+        else
+        {
+            var p = Projectile.Spawn(w, pos, new Vector2(Facing * 1.5f, 1f), this);
+            p.WalkDir = Facing;
+        }
+
+        Sfx.Shot();
+        GameManager.I.OnWeaponFired();
+    }
+
+    /// Налёт: пятёрка бомб сыплется на точку, куда смотрит прицел. Точка ищется
+    /// лучом до породы — так она одинаково задаётся и мышью, и стрелками.
+    void CallAirStrike(Weapon w)
+    {
+        _hasFiredThisTurn = true;
+
+        Vector2 dir = AimDirection;
+        Vector2 origin = (Vector2)transform.position + dir * 0.95f;
+        float x = origin.x + dir.x * 18f;
+
+        var hits = Physics2D.RaycastAll(origin, dir, 60f);
+        float best = float.MaxValue;
+        foreach (var hit in hits)
+        {
+            if (hit.collider.gameObject == gameObject) continue;
+            if (hit.distance < best) { best = hit.distance; x = hit.point.x; }
+        }
+
+        float top = DestructibleTerrain.WorldHeight + 6f;
+        for (int i = 0; i < Mathf.Max(1, w.Burst); i++)
+        {
+            float dx = (i - (w.Burst - 1) * 0.5f) * 2.2f;
+            var pos = new Vector2(x + dx - Facing * 3f, top + i * 0.6f);
+            Projectile.Spawn(w, pos, new Vector2(Facing * 2.5f, -4f), null);
+        }
+
+        Sfx.Shot();
+        GameManager.I.OnWeaponFired();
+    }
+
+    public void Knockback(Vector2 impulse)
+    {
+        if (IsDead) return;
+        _charging = false;
+        _rb.AddForce(impulse, ForceMode2D.Impulse);
+    }
+
+    public void TakeDamage(float dmg)
+    {
+        if (IsDead || dmg <= 0.5f) return;
+        Health -= dmg;
+        if (GameManager.I != null) GameManager.I.RegisterDamage(this, dmg);
+        Fx.FloatingText(transform.position + Vector3.up * 0.8f, "-" + Mathf.RoundToInt(dmg), new Color(1f, 0.5f, 0.4f));
+        if (Health <= 0f) Die();
+    }
+
+    /// Сколько здоровья съедает вода за секунду: около двух с половиной секунд
+    /// с полного здоровья — хватает, чтобы в свой ход выбраться на сушу.
+    const float DrownRate = 42f;
+
+    /// Что червь успевает сказать напоследок. Слова короткие: метка живёт
+    /// меньше секунды и над головой должна читаться целиком.
+    static readonly string[] Farewells =
+    {
+        "Прощай!", "Ой-ой…", "Ну всё…", "Мама!", "Я пошёл…",
+        "Пока-пока!", "Не поминайте лихом", "Эх…"
+    };
+
+    void Die(bool drowned = false)
+    {
+        if (IsDead) return;
+        IsDead = true;
+        Health = 0f;
+
+        // Утонуть можно двумя способами, и хоронят их по-разному. Если вода
+        // просто дошла до червя, стоящего на земле, — это обычная смерть с
+        // прощанием, взрывом и памятником. А если он ушёл на дно, ставить
+        // памятник некуда: там остаются только пузыри. Опору проверяем до
+        // того, как выключим коллайдер, иначе Grounded уже ничего не найдёт.
+        bool sank = drowned && !Grounded;
+
+        ReleaseRope();
+        _crossSr.enabled = false;
+        _col.enabled = false;
+        _rb.simulated = false;
+        _charging = false;
+        GameManager.I.OnWormDied(this);
+        StartCoroutine(DeathSequence(drowned, sank));
+    }
+
+    /// Смерть с прощанием: червь коротко прощается, качается на месте и только
+    /// потом взрывается, оставляя памятник команды. Ход в это время не уходит —
+    /// GameManager ждёт, пока счётчик умирающих не обнулится.
+    System.Collections.IEnumerator DeathSequence(bool drowned, bool sank)
+    {
+        // Ссылку на менеджер каждый раз берём заново: матч может кончиться
+        // прямо во время прощания, и старый объект к концу корутины уже мёртв.
+        if (GameManager.I != null) GameManager.I.BeginDeathAnim();
+
+        Vector2 pos = transform.position;
+        if (drowned)
+        {
+            Fx.FloatingText(pos + Vector2.up * 0.8f, "буль-буль…", new Color(0.6f, 0.85f, 1f));
+            Fx.Bubbles(pos, 8);
+        }
+        else
+        {
+            Fx.FloatingText(pos + Vector2.up * 0.9f, Farewells[Random.Range(0, Farewells.Length)],
+                            new Color(1f, 0.92f, 0.6f));
+            Sfx.Bye();
+        }
+
+        // Прощание короткое: полсекунды покачивания, иначе ход тянется.
+        const float wave = 0.55f;
+        for (float t = 0f; t < wave; t += Time.deltaTime)
+        {
+            if (_art != null)
+            {
+                float k = Mathf.Sin(t * 26f) * 9f;
+                _art.localRotation = Quaternion.Euler(0f, 0f, k);
+                _art.localPosition = new Vector3(0f, Mathf.Abs(Mathf.Sin(t * 13f)) * 0.12f, 0f);
+            }
+            yield return null;
+        }
+
+        if (_body != null) _body.enabled = false;
+        if (_face != null) _face.enabled = false;
+
+        var gm = GameManager.I;
+        if (gm != null && gm.Generation == _gen)
+        {
+            if (sank)
+            {
+                // На дне ни воронки, ни памятника: ставить его туда некуда,
+                // а взрыв в глубине выглядел бы фокусом.
+                Fx.Bubbles(pos, 6);
+            }
+            else
+            {
+                // Взрывается только тот, кого убили. Утонувший на берегу тихо
+                // ложится под памятник: воронка под ним съела бы ему же опору,
+                // и памятник тут же ушёл бы под воду.
+                if (!drowned) Combat.Detonate(pos, 2.2f, 20f);
+                Grave.Place(Team, pos);
+            }
+        }
+
+        if (GameManager.I != null) GameManager.I.EndDeathAnim();
+        Destroy(gameObject);
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "unity": {
+      "type": "stdio",
+      "command": "/Users/valera/.unity/bin/unity",
+      "args": ["mcp", "--project-path", "/Users/valera/Projects/Game"],
+      "env": {}
+    }
+  }
+}
