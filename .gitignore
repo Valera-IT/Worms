@@ -112,3 +112,45 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# ---------------------------------------------------------------------------
+# OS-generated files (Global/macOS.gitignore + Global/Windows.gitignore)
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+Icon?
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ---------------------------------------------------------------------------
+# Editor / IDE files (Global/*.gitignore)
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+*.sublime-workspace
+*.code-workspace
+*~
+*.swp
+*.swo
+
+# ---------------------------------------------------------------------------
+# Claude Code / MCP local machine state
+# ---------------------------------------------------------------------------
+.claude/settings.local.json
+.claude/**/*.local.json
+.claude/projects/
+.claude/memory/
+.utmp/

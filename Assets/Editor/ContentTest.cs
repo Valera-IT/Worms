@@ -16,6 +16,9 @@ public static class ContentTest
     static float _waterAtStart;
     static Crate _bomb;
     static Worm _patient;   // червь, которому адресована аптечка: ход сменится раньше подбора
+    static Worm _faller;    // червь, сброшенный с высоты: он обязан разбиться
+    static Worm _hopper;    // червь, поднятый на высоту прыжка: ему падение бесплатно
+    static float _fallFrom, _fallHealth, _hopHealth;
     static Worm _swimmer;   // червь, опущенный под воду: он обязан утонуть
     static bool _swimmerSet;
     static bool _swimmerGrounded;
@@ -33,6 +36,8 @@ public static class ContentTest
         _restarted = false;
         _swimmer = null;
         _swimmerSet = false;
+        _faller = null;
+        _hopper = null;
         SessionState.SetBool(Flag, true);
         Autostart();
         EditorApplication.update += Tick;
@@ -118,10 +123,12 @@ public static class ContentTest
         }
         if (_step == 1 && t > 2.5) { _step = 2; CheckRope(gm); }
         if (_step == 2 && t > 4.0) { _step = 3; CheckTeleport(gm); }
-        if (_step == 3 && t > 5.0) { _step = 4; DropCrates(gm); }
-        if (_step == 4 && t > 9.5) { _step = 5; CheckCrates(gm); }
-        if (_step == 5 && t > 17.0) { _step = 6; CheckFlood(gm); }
-        if (_step == 6 && t > 20.0) { _step = 7; CheckDrowned(gm); Finish(); }
+        if (_step == 3 && t > 5.0) { _step = 4; DropWorms(gm); }
+        if (_step == 4 && t > 8.0) { _step = 5; CheckFall(gm); }
+        if (_step == 5 && t > 8.5) { _step = 6; DropCrates(gm); }
+        if (_step == 6 && t > 13.0) { _step = 7; CheckCrates(gm); }
+        if (_step == 7 && t > 20.5) { _step = 8; CheckFlood(gm); }
+        if (_step == 8 && t > 23.5) { _step = 9; CheckDrowned(gm); Finish(); }
     }
 
     // --- звук --------------------------------------------------------------
@@ -253,16 +260,16 @@ public static class ContentTest
         var natural = Crate.DropRandom(gm.Terrain);
         if (natural == null) Fail("случайный сброс не нашёл места на карте");
 
-        Debug.Log($"CONTENT step4: сброшено ящиков {Crate.All.Count}, здоровье червя {worm.Health:0}");
+        Debug.Log($"CONTENT step6: сброшено ящиков {Crate.All.Count}, здоровье червя {worm.Health:0}");
     }
 
     static void CheckCrates(GameManager gm)
     {
         var worm = _patient;
         if (worm == null || worm.IsDead)
-            Debug.Log("CONTENT step5: подопечный червь не дожил — проверку аптечки пропускаем");
+            Debug.Log("CONTENT step7: подопечный червь не дожил — проверку аптечки пропускаем");
         else if (worm.Health > 60.5f)
-            Debug.Log($"CONTENT step5: аптечка подобрана, здоровье {worm.Health:0}");
+            Debug.Log($"CONTENT step7: аптечка подобрана, здоровье {worm.Health:0}");
         else
             Fail($"аптечка не подобрана: здоровье {worm.Health:0} (ожидалось больше 60)");
 
@@ -283,8 +290,63 @@ public static class ContentTest
         if (Crate.All.Contains(_bomb)) Fail("ящик под взрывом не сдетонировал");
         if (Crate.All.Count >= before) Fail("список ящиков не уменьшился после детонации");
 
-        Debug.Log($"CONTENT step5: детонация ящика — ящиков {before} → {Crate.All.Count}, " +
+        Debug.Log($"CONTENT step7: детонация ящика — ящиков {before} → {Crate.All.Count}, " +
                   $"контуров {paths} → {gm.Terrain.ColliderPathCount}");
+    }
+
+    // --- урон от падения ---------------------------------------------------
+
+    /// Роняем двух червей: одного с высоты, где падение обязано покалечить,
+    /// второго — ровно на высоту прыжка, где оно обязано остаться бесплатным.
+    /// Иначе порог легко сдвинуть так, что игра начнёт бить за каждый прыжок.
+    static void DropWorms(GameManager gm)
+    {
+        var worms = gm.AllWorms();
+        foreach (var w in worms)
+        {
+            if (w == null || w.IsDead || w == gm.ActiveWorm || w == _patient) continue;
+            if (_faller == null) { _faller = w; continue; }
+            if (_hopper == null) { _hopper = w; break; }
+        }
+        if (_faller == null || _hopper == null) { Debug.Log("CONTENT step4: некого ронять"); return; }
+
+        Vector2 p = _faller.transform.position;
+        // В пещере потолок близко: выше него поднимать нельзя, иначе червь
+        // окажется в камне. Луч пускаем из-за своего коллайдера.
+        var up = Physics2D.Raycast(p + Vector2.up * 0.7f, Vector2.up, 24f);
+        float ceiling = up.collider != null ? up.point.y - 1.2f : p.y + 16f;
+        _fallFrom = Mathf.Min(p.y + 16f, ceiling);
+        _fallHealth = _faller.Health;
+        _faller.PlaceAt(new Vector2(p.x, _fallFrom));
+
+        Vector2 h = _hopper.transform.position;
+        _hopHealth = _hopper.Health;
+        _hopper.PlaceAt(new Vector2(h.x, h.y + 3.4f));   // прыжок поднимает на 3,7
+
+        Debug.Log($"CONTENT step4: роняем с {_fallFrom - p.y:0.0} юнита " +
+                  $"(здоровье {_fallHealth:0}) и подбрасываем на 3,4 (здоровье {_hopHealth:0})");
+    }
+
+    static void CheckFall(GameManager gm)
+    {
+        if (_faller == null || _hopper == null) return;
+
+        if (_faller.IsDead)
+        {
+            Debug.Log("CONTENT step5: сброшенный червь погиб — падение засчитано");
+        }
+        else
+        {
+            float drop = _fallFrom - _faller.transform.position.y;
+            float dmg = _fallHealth - _faller.Health;
+            Debug.Log($"CONTENT step5: падение {drop:0.0} юнита, урон {dmg:0}");
+            if (drop < 7f) Debug.Log("CONTENT step5: лететь было некуда — проверку пропускаем");
+            else if (dmg <= 0.5f) Fail($"падение с {drop:0.0} юнита не нанесло урона");
+            else if (dmg > 30.5f) Fail($"урон от падения {dmg:0} больше потолка в 30");
+        }
+
+        if (!_hopper.IsDead && _hopHealth - _hopper.Health > 0.5f)
+            Fail($"падение с высоты прыжка стоило {_hopHealth - _hopper.Health:0} очков здоровья");
     }
 
     // --- потоп и утопление -------------------------------------------------
@@ -292,12 +354,12 @@ public static class ContentTest
     static void CheckFlood(GameManager gm)
     {
         float water = DestructibleTerrain.WaterLevel;
-        Debug.Log($"CONTENT step6: раунд {gm.Round}, потоп {gm.Flooding}, " +
+        Debug.Log($"CONTENT step8: раунд {gm.Round}, потоп {gm.Flooding}, " +
                   $"вода {_waterAtStart:0.0} → {water:0.0}");
 
         if (gm.State == GameState.GameOver)
         {
-            Debug.Log("CONTENT step6: матч кончился раньше потопа — проверку пропускаем");
+            Debug.Log("CONTENT step8: матч кончился раньше потопа — проверку пропускаем");
             return;
         }
 
@@ -315,7 +377,7 @@ public static class ContentTest
             foreach (var w in worms)
                 if (w != null && !w.IsDead && w != gm.ActiveWorm) { _swimmer = w; break; }
 
-        if (_swimmer == null) { Debug.Log("CONTENT step6: некого топить"); return; }
+        if (_swimmer == null) { Debug.Log("CONTENT step8: некого топить"); return; }
         _swimmerSet = true;
         _swimmerGrounded = _swimmer.Grounded;
         _swimmerHealth = _swimmer.Health;
@@ -340,7 +402,7 @@ public static class ContentTest
         // нельзя: сравнение с null у Unity как раз это и ловит.
         bool dead = _swimmer == null || _swimmer.IsDead;
         int graves = Object.FindObjectsByType<GraveMarker>(FindObjectsSortMode.None).Length;
-        Debug.Log($"CONTENT step7: утонул {dead} (на земле {_swimmerGrounded}), " +
+        Debug.Log($"CONTENT step9: утонул {dead} (на земле {_swimmerGrounded}), " +
                   $"здоровье было {_swimmerHealth:0.0}, памятников {_gravesBefore} → {graves}");
         if (!dead) Fail($"червь под водой не утонул за три секунды, здоровье {_swimmer.Health:0.0}");
         if (_swimmerGrounded && graves <= _gravesBefore)

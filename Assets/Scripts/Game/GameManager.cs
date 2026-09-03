@@ -243,7 +243,12 @@ public class GameManager : MonoBehaviour
     /// Та же раскладка отдельно от матча — ею пользуются тесты и снимки миров.
     public static List<Vector2> SpawnLayout(DestructibleTerrain terrain, int need, int seed)
     {
-        var candidates = terrain.CollectSpawnPoints(1f);
+        // Сначала ищем только ровные площадки. Если карта скалистая и их
+        // меньше, чем нужно с запасом, отпускаем допуск по наклону — лучше
+        // посадить червя на склон, чем свалить всю команду в одну кучу.
+        var candidates = terrain.CollectSpawnPoints(1f, 0.4f);
+        if (candidates.Count < need * 2) candidates = terrain.CollectSpawnPoints(0.5f, 0.6f);
+        if (candidates.Count < need) candidates = terrain.CollectSpawnPoints(0.5f, 1.2f);
         var result = new List<Vector2>();
 
         if (candidates.Count == 0)

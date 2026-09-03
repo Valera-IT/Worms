@@ -314,7 +314,7 @@ public class DestructibleTerrain : MonoBehaviour
 
     /// Есть ли рядом площадка на той же высоте — так проверяется, что червю
     /// есть где стоять, а не что он на острие скалы.
-    bool HasLedgeNear(float wx, float y, List<float> buf, float tol = 1.2f)
+    bool HasLedgeNear(float wx, float y, List<float> buf, float tol)
     {
         LedgesAt(wx, buf, SpawnHeadroom);
         for (int i = 0; i < buf.Count; i++)
@@ -323,7 +323,10 @@ public class DestructibleTerrain : MonoBehaviour
     }
 
     /// Все пригодные точки высадки по всей карте: каждый этаж каждой колонки.
-    public List<Vector2> CollectSpawnPoints(float step = 1f)
+    /// tol — на сколько сосед по горизонтали может отличаться по высоте.
+    /// Прежние 1,2 юнита на плече 0,8 — это склон под пятьдесят градусов: червь
+    /// на такой «площадке» съезжал вниз и уходил в воду ещё до первого хода.
+    public List<Vector2> CollectSpawnPoints(float step = 1f, float tol = 0.35f)
     {
         var points = new List<Vector2>();
         var ledges = new List<float>();
@@ -346,9 +349,11 @@ public class DestructibleTerrain : MonoBehaviour
                 for (int d = 0; d < 4 && thick; d++) thick = IsSolidPixel(px, py - d);
                 if (!thick) continue;
 
+                // Ровно должно быть под всем червём и на шаг в обе стороны:
+                // площадка шириной в один пиксель посреди ската не годится.
                 bool flat = true;
                 for (float d = -0.8f; d <= 0.8f && flat; d += 0.4f)
-                    if (d != 0f) flat = HasLedgeNear(x + d, y, buf);
+                    if (d != 0f) flat = HasLedgeNear(x + d, y, buf, tol);
                 if (flat) points.Add(new Vector2(x, y + 0.8f));
             }
         }

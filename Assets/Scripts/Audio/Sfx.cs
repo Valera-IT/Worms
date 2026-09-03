@@ -9,7 +9,7 @@ public static class Sfx
     /// Какие звуки вообще есть. Имена — то, чем их зовут из игры.
     public enum Sound
     {
-        Shot, Shotgun, Explosion, Splash, Step, Jump, Bounce,
+        Shot, Shotgun, Explosion, Splash, Step, Jump, Bounce, Thud,
         CrateDrop, Pickup, RopeShot, RopeHit, Teleport, TurnStart, Flood, Bye
     }
 
@@ -32,6 +32,7 @@ public static class Sfx
     public static void Step() => Play(Sound.Step, 0.35f, Random.Range(0.85f, 1.2f));
     public static void Jump() => Play(Sound.Jump, 0.5f, Random.Range(0.95f, 1.1f));
     public static void Bounce() => Play(Sound.Bounce, 0.45f, Random.Range(0.9f, 1.15f));
+    public static void Thud() => Play(Sound.Thud, 0.75f, Random.Range(0.92f, 1.08f));
     public static void CrateDrop() => Play(Sound.CrateDrop, 0.7f);
     public static void Pickup() => Play(Sound.Pickup, 0.8f);
     public static void RopeShot() => Play(Sound.RopeShot, 0.6f, Random.Range(0.95f, 1.08f));
@@ -122,6 +123,7 @@ public static class Sfx
         Sound.Step => MakeStep(),
         Sound.Jump => MakeJump(),
         Sound.Bounce => MakeBounce(),
+        Sound.Thud => MakeThud(),
         Sound.CrateDrop => MakeCrateDrop(),
         Sound.Pickup => MakePickup(),
         Sound.RopeShot => MakeRopeShot(),
@@ -217,6 +219,18 @@ public static class Sfx
         var b = new Synth.Osc();
         return Synth.Build("sfx_bounce", 0.16f, t =>
             (a.Sin(420f) * 0.7f + b.Sin(631f) * 0.3f) * Synth.Env(t, 0.001f, 0.035f));
+    }
+
+    /// Червь приложился о землю: низкий тон, съезжающий вниз, и глухой шлепок
+    /// шума поверх. Отскок гранаты рядом звучит деревянно и высоко — падение
+    /// должно читаться как удар телом, а не как «тюк».
+    static AudioClip MakeThud()
+    {
+        var osc = new Synth.Osc();
+        var noise = new Synth.Noise(9137);
+        return Synth.Build("sfx_thud", 0.26f, t =>
+            osc.Sin(Mathf.Lerp(150f, 62f, Mathf.Clamp01(t / 0.12f))) * Synth.Env(t, 0.002f, 0.12f) * 0.8f
+            + noise.Next() * Synth.Env(t, 0.001f, 0.05f) * 0.35f);
     }
 
     /// Ящик пошёл вниз: тихий двойной сигнал, чтобы взгляд успел найти парашют.

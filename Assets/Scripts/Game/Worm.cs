@@ -17,6 +17,19 @@ public class Worm : MonoBehaviour
     const float JumpX = 7.1f;
     const float JumpY = 13.4f;
 
+    /// На сколько червь способен взойти шагом, не прыгая. Чуть больше своего
+    /// роста: ступенька в ландшафте и спина чужого червя проходят одинаково.
+    const float StepHeight = 1.25f;
+
+    // Урон от падения, как в оригинале: считается пройденная вниз высота, а не
+    // скорость удара. Прыжок бесплатный по построению — при vy 13,4 и g 24 он
+    // поднимает на 3,7 юнита, и до порога остаётся запас. Дальше по 5 очков за
+    // юнит с потолком в 30: падение с любой высоты калечит, но не убивает целого
+    // червя — добить его должно оружие, а не рельеф.
+    const float FallFree = 6f;
+    const float FallPerUnit = 5f;
+    const float FallMax = 30f;
+
     Rigidbody2D _rb;
     CircleCollider2D _col;
     Transform _art;               // тело и черты вместе — их и разворачиваем по Facing
@@ -33,6 +46,9 @@ public class Worm : MonoBehaviour
     float _pushTime;              // сколько червь подряд толкается вбок, для захода на склон
     float _stepTimer;
     float _drownTimer;            // сколько червь уже под водой: тонет не мгновенно
+    float _restTime;              // сколько червь стоит без дела — после чего примерзает
+    float _fallPeak = float.NaN;  // высшая точка текущего полёта; NaN — падение не считаем
+    bool _frozen;                 // покой: тело зажато связями, толкнуть его нельзя
     float _bubbleTimer;
     int _lastWeapon = -1;
     Rope _rope;
@@ -92,6 +108,7 @@ public class Worm : MonoBehaviour
 
     public void BeginTurn()
     {
+        Wake();
         _hasFiredThisTurn = false;
         _burstLeft = 0;
         _charge = 0f;
@@ -138,6 +155,128 @@ public class Worm : MonoBehaviour
         }
     }
 
+    static readonly Collider2D[] _overlap = new Collider2D[8];
+
+    /// Занято ли место, если поставить червя центром в at (себя не считаем).
+    bool Occupied(Vector2 at)
+    {
+        int n = Physics2D.OverlapCircle(at, _col.radius * 0.95f, _groundFilter, _overlap);
+        for (int i = 0; i < n; i++)
+        {
+            var c = _overlap[i];
+            if (c != null && c.gameObject != gameObject) return true;
+        }
+        return false;
+    }
+
+    /// Шаг наверх через препятствие: ищем самую низкую высоту, с которой червь
+    /// пролезает вперёд, и переставляем его туда. Так он взбегает по ступеням
+    /// и пробегает по спине чужого червя, как в оригинале, вместо того чтобы
+    /// катить его перед собой.
+    bool StepOver(float dir)
+    {
+        float d = Mathf.Sign(dir) * 0.5f;
+        for (float dy = 0.25f; dy <= StepHeight; dy += 0.15f)
+        {
+            var target = _rb.position + new Vector2(d, dy);
+            if (Occupied(target)) continue;
+            // Над собой тоже должно быть свободно, иначе червь въедет в потолок.
+            if (Occupied(_rb.position + new Vector2(0f, dy))) return false;
+
+            _rb.position = target;
+            transform.position = target;
+            _rb.linearVelocity = new Vector2(Mathf.Sign(dir) * MoveSpeed, 0f);
+            return true;
+        }
+        return false;
+    }
+
+    /// Червь в покое стоит намертво. В оригинале червь после приземления замирает
+    /// там, где упал: его не сдвинуть боком, а сам он не съезжает по склону.
+    /// У нас же круглый коллайдер с трением 0,35 скатывался с любого ската —
+    /// команда уползала в море ещё до первого хода — и работал шаром, которым
+    /// активный червь толкал соседа.
+    void Settle()
+    {
+        if (IsDead || _rb == null || !_rb.simulated) return;
+
+        bool steering = IsActive && GameManager.I != null
+                        && (GameManager.I.State == GameState.Aim || GameManager.I.State == GameState.Retreat);
+        bool wet = transform.position.y < DestructibleTerrain.WaterLevel - 0.1f;
+
+        if (Roped || wet || !Grounded) { Wake(); return; }
+
+        float move = steering && Controls != null ? Controls.Move : 0f;
+        if (Mathf.Abs(move) > 0.01f) { Wake(); return; }
+
+        // Трение покоя: остаток скорости гасим сами, а не ждём, пока круглый
+        // коллайдер остановится о неровности.
+        var v = _rb.linearVelocity;
+        if (Mathf.Abs(v.x) > 0.01f && !_frozen)
+        {
+            v.x = Mathf.MoveTowards(v.x, 0f, 26f * Time.deltaTime);
+            _rb.linearVelocity = v;
+        }
+
+        // Активного червя не примораживаем: ему ещё прыгать и получать отдачу.
+        if (steering) { Wake(); return; }
+
+        if (v.sqrMagnitude > 0.09f) { _restTime = 0f; return; }
+        _restTime += Time.deltaTime;
+        if (_restTime > 0.12f) Freeze();
+    }
+
+    /// Падение: пока червь в воздухе, помним высшую точку; коснулся земли —
+    /// платит за пройденную вниз высоту сверх порога. Верёвка и вода падение
+    /// отменяют: на верёвке червь спускается сам, а в воду он не падает, а тонет.
+    void Falling(bool onGround)
+    {
+        if (IsDead) return;
+
+        if (Roped || transform.position.y < DestructibleTerrain.WaterLevel)
+        {
+            _fallPeak = float.NaN;
+            return;
+        }
+
+        // Приземлением считаем только остановку. Луч «стою на земле» щупает на
+        // 0,18 юнита вниз, и червь, летящий мимо уступа, на кадр оказывается
+        // «на земле» — если верить этому, длинное падение дробится на короткие
+        // и не стоит ничего.
+        if (!onGround || _rb.linearVelocity.y < -0.5f)
+        {
+            float y = transform.position.y;
+            _fallPeak = float.IsNaN(_fallPeak) ? y : Mathf.Max(_fallPeak, y);
+            return;
+        }
+
+        if (float.IsNaN(_fallPeak)) return;
+
+        float drop = _fallPeak - transform.position.y;
+        _fallPeak = float.NaN;
+        if (drop <= FallFree) return;
+
+        Sfx.Thud();
+        TakeDamage(Mathf.Min(FallMax, (drop - FallFree) * FallPerUnit));
+    }
+
+    void Freeze()
+    {
+        if (_frozen) return;
+        _frozen = true;
+        _rb.linearVelocity = Vector2.zero;
+        _rb.constraints = RigidbodyConstraints2D.FreezeAll;
+    }
+
+    /// Расковать тело: ход, отбрасывание, телепорт, ушедшая из-под ног земля.
+    public void Wake()
+    {
+        _restTime = 0f;
+        if (!_frozen) return;
+        _frozen = false;
+        _rb.constraints = RigidbodyConstraints2D.FreezeRotation;
+    }
+
     void Update()
     {
         if (GameManager.I == null || GameManager.I.Generation != _gen) return;
@@ -158,8 +297,11 @@ public class Worm : MonoBehaviour
         _art.localScale = new Vector3(Facing, 1f, 1f);
 
         Drowning();
+        Settle();
 
-        if (!Grounded) _airTime += Time.deltaTime; else _airTime = 0f;
+        bool onGround = Grounded;
+        if (!onGround) _airTime += Time.deltaTime; else _airTime = 0f;
+        Falling(onGround);
 
         Steps(active);
     }
@@ -261,8 +403,11 @@ public class Worm : MonoBehaviour
                 // в полёте, где ввод уже не действует — ходьба от этого залипала.
                 bool blocked = _pushTime > 0.08f && Mathf.Abs(v.x) < MoveSpeed * 0.35f;
                 v.x = h * MoveSpeed;
-                if (blocked && Mathf.Abs(v.y) < 0.2f) v.y = Mathf.Max(v.y, 0.6f);
                 _rb.linearVelocity = v;
+                // Упёрся — заходим сверху: и на уступ, и на чужого червя.
+                // Прежний толчок вверх на 0,6 м/с поднимал червя на пару
+                // сантиметров, поэтому в соседа он утыкался и толкал его.
+                if (blocked && Mathf.Abs(v.y) < 0.6f && StepOver(h)) _pushTime = 0f;
             }
             else _pushTime = 0f;
 
@@ -382,6 +527,8 @@ public class Worm : MonoBehaviour
     public void PlaceAt(Vector2 pos)
     {
         ReleaseRope();
+        Wake();
+        _fallPeak = float.NaN;
         _rb.linearVelocity = Vector2.zero;
         _rb.position = pos;
         transform.position = pos;
@@ -589,6 +736,7 @@ public class Worm : MonoBehaviour
     {
         if (IsDead) return;
         _charging = false;
+        Wake();
         _rb.AddForce(impulse, ForceMode2D.Impulse);
     }
 
