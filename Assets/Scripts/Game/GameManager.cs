@@ -379,6 +379,36 @@ public class GameManager : MonoBehaviour
         TurnTimeLeft = 0.5f;
     }
 
+    /// Можно ли прямо сейчас передать ход другому червю своей команды. Окно
+    /// открыто в начале хода и закрывается первым же действием: походил,
+    /// прыгнул или выстрелил — играешь тем, кем начал.
+    public bool CanSelectWorm =>
+        State == GameState.Aim && ActiveWorm != null && !ActiveWorm.IsDead
+        && !ActiveWorm.HasActed && Teams[CurrentTeam].AliveCount > 1;
+
+    /// Выбор червя, как в оригинале: ход начинается не обязательно с того, кем
+    /// хочется играть. Меняем ровно одно — активного червя; таймер хода, ветер,
+    /// выбранное оружие и очередь команд остаются как были. Team.ActiveIndex
+    /// сдвигается вместе с выбором, поэтому следующий круг пойдёт от нового
+    /// червя — перебор по кругу от этого не сбивается.
+    /// Возвращает true, если червь действительно сменился.
+    public bool SelectNextWorm()
+    {
+        if (!CanSelectWorm) return false;
+
+        var next = Teams[CurrentTeam].NextAliveWorm();
+        if (next == null || next == ActiveWorm) return false;
+
+        // Прежний червь остаётся стоять там же: он ничего не успел сделать,
+        // а Settle через мгновение снова его приморозит.
+        ActiveWorm.ReleaseRope();
+        ActiveWorm = next;
+        next.BeginTurn();
+        Cam.Follow(next.transform);
+        Sfx.TurnStart();
+        return true;
+    }
+
     public void SelectWeapon(int index)
     {
         if (index < 0 || index >= Weapon.All.Length) return;
@@ -475,6 +505,10 @@ public class GameManager : MonoBehaviour
             case GameState.Aim:
                 TurnTimeLeft -= Time.deltaTime;
                 if (ActiveWorm == null || ActiveWorm.IsDead) { EnterSettle(1.0f); break; }
+                // Выбор червя читаем здесь, а не в Worm.HandleInput: он меняет
+                // самого активного червя, и делать это изнутри его же обновления
+                // значило бы менять землю под ногами у идущего кода.
+                if (ActiveWorm.Controls != null && ActiveWorm.Controls.SelectWormPressed) SelectNextWorm();
                 if (TurnTimeLeft <= 0f) EnterSettle(0.6f);
                 break;
 

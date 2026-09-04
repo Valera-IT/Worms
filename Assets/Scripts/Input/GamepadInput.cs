@@ -21,6 +21,7 @@ public class GamepadInput : IHumanInput
     public bool FireReleased { get; private set; }
     public int WeaponRequest => -1;
     public int WeaponCycle { get; private set; }
+    public bool SelectWormPressed { get; private set; }
 
     public float ZoomDelta { get; private set; }
     public Vector2 PanDelta { get; private set; }
@@ -33,6 +34,7 @@ public class GamepadInput : IHumanInput
     {
         Move = 0f; AimAxis = 0f; WeaponCycle = 0;
         JumpPressed = FirePressed = FireHeld = FireReleased = RestartPressed = false;
+        SelectWormPressed = false;
         ZoomDelta = 0f; PanDelta = Vector2.zero; PanActive = false;
         Active = false;
 
@@ -51,6 +53,9 @@ public class GamepadInput : IHumanInput
         if (pad.rightShoulder.wasPressedThisFrame) WeaponCycle = 1;
         else if (pad.leftShoulder.wasPressedThisFrame) WeaponCycle = -1;
 
+        // Y — другой червь команды: единственная свободная лицевая кнопка.
+        SelectWormPressed = pad.buttonNorth.wasPressedThisFrame;
+
         RestartPressed = pad.startButton.wasPressedThisFrame;
 
         // Триггеры — зум, правый стик — панорама.
@@ -66,6 +71,7 @@ public class GamepadInput : IHumanInput
 
         Active = Mathf.Abs(Move) > 0.01f || Mathf.Abs(AimAxis) > 0.01f
               || JumpPressed || FireHeld || FireReleased || WeaponCycle != 0
+              || SelectWormPressed
               || RestartPressed || PanActive || Mathf.Abs(ZoomDelta) > 0.0001f;
     }
 }

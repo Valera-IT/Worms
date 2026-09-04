@@ -33,6 +33,19 @@ public class Team
         }
     }
 
+    /// Сколько червей команды ещё живы. Нужно выбору червя: переключать
+    /// некого, пока в команде остался один.
+    public int AliveCount
+    {
+        get
+        {
+            int n = 0;
+            for (int i = 0; i < Worms.Count; i++)
+                if (Worms[i] != null && !Worms[i].IsDead) n++;
+            return n;
+        }
+    }
+
     public float TotalHealth
     {
         get

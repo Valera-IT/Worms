@@ -47,6 +47,9 @@ public class Hud : MonoBehaviour
 
     VisualElement _helpBox;
 
+    VisualElement _swapBtn;       // «другой червь» — единственный способ выбрать червя пальцем
+    bool _swapShown = true;
+
     readonly TouchPad _touch = new TouchPad();
 
     VisualElement _gameOver;
@@ -131,6 +134,7 @@ public class Hud : MonoBehaviour
         BuildWeaponPick();
         BuildHelp();
         BuildPauseButton();
+        BuildSwapButton();
         _touch.Build(_root, _safe);
         BuildGameOver();
     }
@@ -167,6 +171,49 @@ public class Hud : MonoBehaviour
             bars.Add(bar);
         }
         btn.Add(bars);
+        _safe.Add(btn);
+    }
+
+    /// Кнопка «другой червь»: рядом с паузой, показывается только пока выбор
+    /// открыт — то есть в начале своего хода, до первого шага и выстрела.
+    /// С клавиатуры и геймпада то же делают Tab и Y.
+    void BuildSwapButton()
+    {
+        var btn = HudTheme.Box(HudTheme.Panel);
+        HudTheme.Round(btn, 8);
+        btn.pickingMode = PickingMode.Position;
+        var st = btn.style;
+        st.position = Position.Absolute;
+        st.right = 92; st.bottom = 20;      // левее кнопки паузы, через тот же зазор
+        st.width = 56; st.height = 56;
+        st.alignItems = Align.Center;
+        st.justifyContent = Justify.Center;
+        btn.RegisterCallback<PointerDownEvent>(evt =>
+        {
+            GameInput.RequestNextWorm();
+            evt.StopPropagation();
+        });
+
+        // Стрелка вправо, собранная из трёх полосок: глифам в шрифте здесь
+        // доверять нельзя ровно так же, как и в кнопке паузы.
+        var shaft = HudTheme.Box(HudTheme.Ink);
+        HudTheme.Round(shaft, 2);
+        shaft.style.position = Position.Absolute;
+        shaft.style.width = 26; shaft.style.height = 5;
+        btn.Add(shaft);
+
+        for (int i = 0; i < 2; i++)
+        {
+            var barb = HudTheme.Box(HudTheme.Ink);
+            HudTheme.Round(barb, 2);
+            barb.style.position = Position.Absolute;
+            barb.style.width = 14; barb.style.height = 5;
+            barb.style.left = 30; barb.style.top = i == 0 ? 20 : 30;
+            barb.style.rotate = new Rotate(i == 0 ? 40f : -40f);
+            btn.Add(barb);
+        }
+
+        _swapBtn = btn;
         _safe.Add(btn);
     }
 
@@ -286,10 +333,12 @@ public class Hud : MonoBehaviour
         HudTheme.Round(bar, 8);
         HudTheme.Pad(bar, 6, 6);
 
-        // Шестнадцать стволов в один ряд не влезают ни на телефоне, ни на мониторе,
-        // поэтому панель — сетка: восемь слотов в ряду, рядов столько, сколько нужно.
+        // Весь арсенал в один ряд не влезает ни на телефоне, ни на мониторе,
+        // поэтому панель — сетка в два ряда: половина слотов в ряду (при
+        // семнадцати стволах — девять и восемь). Числом 8 ряд был прибит
+        // намертво, и семнадцатое оружие открывало третий ряд из одной иконки.
         var rows = new List<VisualElement>();
-        int perRow = 8;
+        int perRow = (Weapon.All.Length + 1) / 2;
         for (int r = 0; r * perRow < Weapon.All.Length; r++)
         {
             var row = HudTheme.Box(Color.clear);
@@ -462,6 +511,7 @@ public class Hud : MonoBehaviour
         UpdatePower(gm);
         UpdateWeapons(gm);
         UpdateWeaponPick(gm);
+        UpdateSwapButton(gm);
         UpdateTags(gm);
         UpdateFloaters();
         _touch.Tick(_scheme, gm, _cam);
@@ -500,6 +550,18 @@ public class Hud : MonoBehaviour
             l.style.marginTop = 2; l.style.marginBottom = 2;
             _helpBox.Add(l);
         }
+    }
+
+    /// Кнопку показываем ровно тогда, когда нажатие что-то сделает: свой ход,
+    /// живой игрок, ничего ещё не сделано и в команде есть кем ходить.
+    void UpdateSwapButton(GameManager gm)
+    {
+        bool show = gm.CanSelectWorm
+                 && !(App.I != null && App.I.Paused)
+                 && !(gm.Teams[gm.CurrentTeam].IsBot);
+        if (show == _swapShown) return;
+        _swapShown = show;
+        _swapBtn.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
     }
 
     void UpdateTeams(GameManager gm)
@@ -766,7 +828,7 @@ public class Hud : MonoBehaviour
     {
         "←/→ — идти,  ↑/↓ — прицел,  Enter — прыжок",
         "Space — держать и отпустить для выстрела",
-        "1-9 и 0 — оружие,  Q/E — листать весь арсенал",
+        "1-9 и 0 — оружие,  Q/E — листать весь арсенал,  Tab — другой червь",
         "колесо — зум, СКМ — камера",
         "Верёвка: ←/→ — раскачка, ↑/↓ — длина, Enter — отцеп",
         "R или Esc — пауза"
@@ -776,7 +838,8 @@ public class Hud : MonoBehaviour
     {
         "Левый стик — ход и прицел,  A — прыжок",
         "X — держать и отпустить для выстрела",
-        "Бамперы — листать оружие,  триггеры — зум, правый стик — камера",
+        "Бамперы — листать оружие,  Y — другой червь",
+        "Триггеры — зум, правый стик — камера",
         "Верёвка: стик — раскачка и длина,  A — отцеп",
         "Start — пауза"
     };
@@ -784,6 +847,7 @@ public class Hud : MonoBehaviour
     static readonly string[] TouchHelp =
     {
         "Прицел ещё можно тянуть пальцем от червя",
-        "Сетка внизу — оружие,  два пальца — зум,  кнопка справа — пауза"
+        "Сетка внизу — оружие,  два пальца — зум,  кнопка справа — пауза",
+        "Стрелка рядом с паузой — сходить другим червём"
     };
 }

@@ -119,6 +119,7 @@ public class GameInput : MonoBehaviour, IGameInput, ISystemInput
     public bool FireReleased => Fresh().FireReleased;
     public int WeaponRequest => Fresh().WeaponRequest;
     public int WeaponCycle => Fresh().WeaponCycle;
+    public bool SelectWormPressed => Fresh().SelectWormPressed;
 
     public float ZoomDelta => Fresh().ZoomDelta;
     public Vector2 PanDelta => Fresh().PanDelta;
@@ -129,5 +130,12 @@ public class GameInput : MonoBehaviour, IGameInput, ISystemInput
     public static void RequestWeapon(int index)
     {
         if (GameManager.I != null) GameManager.I.SelectWeapon(index);
+    }
+
+    /// То же для выбора червя: кнопка HUD зовёт напрямую, минуя схему ввода —
+    /// иначе нажатие мышью пришлось бы вкладывать в реализацию касаний.
+    public static void RequestNextWorm()
+    {
+        if (GameManager.I != null) GameManager.I.SelectNextWorm();
     }
 }

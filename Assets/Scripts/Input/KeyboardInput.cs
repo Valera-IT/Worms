@@ -18,6 +18,7 @@ public class KeyboardInput : IHumanInput
     public bool FireReleased { get; private set; }
     public int WeaponRequest { get; private set; }
     public int WeaponCycle { get; private set; }
+    public bool SelectWormPressed { get; private set; }
 
     public float ZoomDelta { get; private set; }
     public Vector2 PanDelta { get; private set; }
@@ -31,6 +32,7 @@ public class KeyboardInput : IHumanInput
     {
         Move = 0f; AimAxis = 0f; WeaponRequest = -1; WeaponCycle = 0;
         JumpPressed = FirePressed = FireReleased = RestartPressed = false;
+        SelectWormPressed = false;
         FireHeld = false;
         ZoomDelta = 0f; PanDelta = Vector2.zero;
 
@@ -62,6 +64,10 @@ public class KeyboardInput : IHumanInput
 
             if (kb.eKey.wasPressedThisFrame || kb.rightBracketKey.wasPressedThisFrame) WeaponCycle = 1;
             else if (kb.qKey.wasPressedThisFrame || kb.leftBracketKey.wasPressedThisFrame) WeaponCycle = -1;
+
+            // Tab — другой червь команды, как Backspace в оригинале: та же
+            // клавиша «перебрать своих», только под рукой на всех раскладках.
+            SelectWormPressed = kb.tabKey.wasPressedThisFrame;
 
             // R или Esc открывают паузу (прежний перезапуск по R переехал в меню паузы).
             RestartPressed = kb.rKey.wasPressedThisFrame || kb.escapeKey.wasPressedThisFrame;
@@ -98,6 +104,6 @@ public class KeyboardInput : IHumanInput
         Active = mouseUsed
               || Mathf.Abs(Move) > 0.01f || Mathf.Abs(AimAxis) > 0.01f
               || JumpPressed || FireHeld || FireReleased || RestartPressed
-              || WeaponRequest >= 0 || WeaponCycle != 0;
+              || WeaponRequest >= 0 || WeaponCycle != 0 || SelectWormPressed;
     }
 }

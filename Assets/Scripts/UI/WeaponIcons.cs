@@ -52,6 +52,7 @@ public static class WeaponIcons
             WeaponKind.Sheep => SheepIcon(),
             WeaponKind.AirStrike => AirStrike(),
             WeaponKind.Rope => RopeIcon(),
+            WeaponKind.Prod => ProdIcon(),
             _ => TeleportIcon()
         };
 
@@ -254,6 +255,32 @@ public static class WeaponIcons
         p.Disc(29f, 37f, 3.2f, fire);
         p.Disc(22f, 40f, 3.4f, fireLit);
         p.Disc(22f, 45f, 1.8f, fireLit);
+        return p;
+    }
+
+    /// Толчок: рука с выставленным указательным пальцем — тем самым, которым
+    /// в оригинале сталкивают соседа с обрыва. Смотрит вправо, как и червь.
+    static Pix ProdIcon()
+    {
+        var p = new Pix(S, S);
+        var skin = new Color32(226, 176, 128, 255);
+        var skinLit = new Color32(250, 214, 176, 255);
+        var cuff = new Color32(72, 108, 176, 255);
+
+        p.Rect(6, 15, 10, 16, cuff);              // манжета рукава
+        p.Rect(14, 17, 4, 12, new Color32(52, 84, 148, 255));
+
+        p.Disc(23f, 23f, 9.5f, skin);             // кулак
+        p.Disc(20f, 26f, 4.2f, skinLit);
+
+        p.Rect(30, 21, 13, 6, skin);              // указательный палец
+        p.Disc(43f, 24f, 3f, skin);
+        p.Rect(31, 25, 10, 2, skinLit);
+
+        // Толчок: три чёрточки перед пальцем — движение вправо.
+        var air = new Color32(236, 236, 240, 255);
+        p.Rect(38, 33, 8, 3, air);
+        p.Rect(36, 12, 8, 3, air);
         return p;
     }
 

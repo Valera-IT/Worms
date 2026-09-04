@@ -30,6 +30,7 @@ public static class InputTest
         public bool FireReleased => false;
         public int WeaponRequest => -1;
         public int WeaponCycle => 0;
+        public bool SelectWormPressed { get; set; }
     }
 
     static ScriptedInput _scripted;

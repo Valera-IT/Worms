@@ -3,7 +3,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 
 /// Проверка содержимого фазы 9: процедурный звук, ящики с припасами, верёвка,
-/// телепорт и потоп с утоплением. Гоняется в пещере — там есть потолок для
+/// телепорт и потоп с утоплением; сюда же добавлены толчок и выбор червя. Гоняется в пещере — там есть потолок для
 /// гарпуна и нет воды, поэтому прибывающая вода видна особенно ясно.
 /// Запуск: меню Worms → Тест содержимого или Unity -executeMethod ContentTest.Run
 public static class ContentTest
@@ -19,6 +19,9 @@ public static class ContentTest
     static Worm _faller;    // червь, сброшенный с высоты: он обязан разбиться
     static Worm _hopper;    // червь, поднятый на высоту прыжка: ему падение бесплатно
     static float _fallFrom, _fallHealth, _hopHealth;
+    static Worm _prodded;   // червь, которого толкнули: он обязан улететь с места
+    static float _prodFrom, _prodHealth;
+    static int _prodDir;
     static Worm _swimmer;   // червь, опущенный под воду: он обязан утонуть
     static bool _swimmerSet;
     static bool _swimmerGrounded;
@@ -38,6 +41,7 @@ public static class ContentTest
         _swimmerSet = false;
         _faller = null;
         _hopper = null;
+        _prodded = null;
         SessionState.SetBool(Flag, true);
         Autostart();
         EditorApplication.update += Tick;
@@ -121,14 +125,23 @@ public static class ContentTest
             Debug.Log($"CONTENT step1: мир «{gm.Terrain.Style.Name}», ход {gm.Config.TurnTime:0.0} с, " +
                       $"потоп с раунда {gm.Config.FloodRound}, вода {_waterAtStart:0.0}");
         }
-        if (_step == 1 && t > 2.5) { _step = 2; CheckRope(gm); }
-        if (_step == 2 && t > 4.0) { _step = 3; CheckTeleport(gm); }
-        if (_step == 3 && t > 5.0) { _step = 4; DropWorms(gm); }
-        if (_step == 4 && t > 8.0) { _step = 5; CheckFall(gm); }
-        if (_step == 5 && t > 8.5) { _step = 6; DropCrates(gm); }
-        if (_step == 6 && t > 13.0) { _step = 7; CheckCrates(gm); }
-        if (_step == 7 && t > 20.5) { _step = 8; CheckFlood(gm); }
-        if (_step == 8 && t > 23.5) { _step = 9; CheckDrowned(gm); Finish(); }
+        // Выбор червя и толчок ждут состояния Aim: вне своего хода менять червя
+        // и некому, и нечем. Ходы здесь по 1,2 с, поэтому ловим ближайший.
+        if (_step == 1 && t > 2.0 && (gm.State == GameState.Aim || t > 5.0))
+        {
+            _step = 2;
+            CheckWormSwap(gm);
+            DoProd(gm);
+        }
+        if (_step == 2 && t > 2.8) { _step = 3; CheckProd(gm); }
+        if (_step == 3 && t > 3.5) { _step = 4; CheckRope(gm); }
+        if (_step == 4 && t > 5.0) { _step = 5; CheckTeleport(gm); }
+        if (_step == 5 && t > 6.0) { _step = 6; DropWorms(gm); }
+        if (_step == 6 && t > 9.0) { _step = 7; CheckFall(gm); }
+        if (_step == 7 && t > 9.5) { _step = 8; DropCrates(gm); }
+        if (_step == 8 && t > 14.0) { _step = 9; CheckCrates(gm); }
+        if (_step == 9 && t > 21.5) { _step = 10; CheckFlood(gm); }
+        if (_step == 10 && t > 24.5) { _step = 11; CheckDrowned(gm); Finish(); }
     }
 
     // --- звук --------------------------------------------------------------
@@ -162,6 +175,118 @@ public static class ContentTest
         double sum = 0;
         for (int i = 0; i < data.Length; i++) sum += (double)data[i] * data[i];
         return data.Length > 0 ? Mathf.Sqrt((float)(sum / data.Length)) : 0f;
+    }
+
+    // --- выбор червя -------------------------------------------------------
+
+    /// Ход начинается не обязательно с того червя, кем хочется играть. Смена
+    /// обязана поменять ровно одно — активного червя, не тронув таймер хода:
+    /// иначе перебором своих можно было бы ходить бесконечно.
+    static void CheckWormSwap(GameManager gm)
+    {
+        var before = gm.ActiveWorm;
+        if (before == null) { Fail("нет активного червя для смены"); return; }
+
+        var team = gm.Teams[gm.CurrentTeam];
+        if (team.AliveCount < 2)
+        {
+            Debug.Log("CONTENT step2: в команде один червь — менять некого");
+            return;
+        }
+        if (!gm.CanSelectWorm) { Fail("выбор червя закрыт в начале хода"); return; }
+
+        float time = gm.TurnTimeLeft;
+        int weapon = gm.SelectedWeapon;
+        float wind = gm.Wind;
+
+        if (!gm.SelectNextWorm()) { Fail("смена червя не сработала"); return; }
+        var after = gm.ActiveWorm;
+
+        if (after == before) Fail("активный червь не сменился");
+        if (after == null || after.Team != team) Fail("смена увела ход в чужую команду");
+        if (gm.TurnTimeLeft > time + 0.001f) Fail($"смена червя накинула времени: {time:0.00} → {gm.TurnTimeLeft:0.00}");
+        if (gm.SelectedWeapon != weapon) Fail("смена червя сбросила оружие");
+        if (!Mathf.Approximately(gm.Wind, wind)) Fail("смена червя перекрутила ветер");
+        if (gm.State != GameState.Aim) Fail("смена червя увела ход из прицеливания");
+
+        Debug.Log($"CONTENT step2: червь {before.WormName} → {after.WormName}, " +
+                  $"время хода {time:0.00} → {gm.TurnTimeLeft:0.00}");
+    }
+
+    // --- толчок ------------------------------------------------------------
+
+    /// Толчок не наносит урона, не тратит патрон и не заканчивает ход, но
+    /// сдвигает соседа с места — ради этого он и нужен у воды и над обрывом.
+    static void DoProd(GameManager gm)
+    {
+        var worm = gm.ActiveWorm;
+        if (worm == null) { Fail("нет активного червя для толчка"); return; }
+
+        foreach (var v in gm.AllWorms())
+        {
+            if (v == null || v.IsDead || v == worm || v == _patient) continue;
+            _prodded = v;
+            break;
+        }
+        if (_prodded == null) { Debug.Log("CONTENT step2: некого толкать"); return; }
+
+        // Ставим соседа вплотную перед носом: досягаемость толчка — 1,3 юнита
+        // от точки в 0,6 перед червём, и 1,05 в неё попадает наверняка.
+        // Сторону выбираем по камню: в пещере стена в полушаге справа обычное
+        // дело, и толкать в неё — проверять не толчок, а породу.
+        Vector2 p = worm.transform.position;
+        int dir = 0;
+        foreach (int d in new[] { 1, -1 })
+        {
+            if (gm.Terrain.IsSolidWorld(p + new Vector2(d * 1.05f, 0f))) continue;
+            if (gm.Terrain.IsSolidWorld(p + new Vector2(d * 2.6f, 0.6f))) continue;
+            dir = d;
+            break;
+        }
+        if (dir == 0)
+        {
+            Debug.Log("CONTENT step2: вокруг червя камень — толкать некуда");
+            _prodded = null;
+            return;
+        }
+
+        worm.Facing = dir;
+        _prodded.PlaceAt(new Vector2(p.x + dir * 1.05f, p.y));
+        _prodFrom = _prodded.transform.position.x;
+        _prodHealth = _prodded.Health;
+        _prodDir = dir;
+
+        int idx = Weapon.IndexOf(WeaponKind.Prod);
+        var prod = Weapon.All[idx];
+        if (prod.Kind != WeaponKind.Prod) { Fail("толчка нет в арсенале"); return; }
+        if (prod.Damage > 0f) Fail($"у толчка есть урон: {prod.Damage:0}");
+        if (prod.Ammo >= 0) Fail("толчок не бесконечный");
+
+        var state = gm.State;
+        var hit = worm.Prod(prod);
+
+        if (hit != _prodded) Fail("толчок не нашёл соседа вплотную");
+        if (_prodded.Health < _prodHealth - 0.001f) Fail("толчок снял здоровье");
+        if (gm.State != state) Fail("толчок завершил ход, а не должен");
+        if (gm.AmmoOf(idx) != -1) Fail($"толчок потратил патрон: осталось {gm.AmmoOf(idx)}");
+        if (gm.CanSelectWorm) Fail("после толчка червя всё ещё можно сменить");
+
+        Debug.Log($"CONTENT step2: {worm.WormName} толкает {_prodded.WormName} " +
+                  $"с x {_prodFrom:0.0} в сторону {_prodDir}");
+    }
+
+    static void CheckProd(GameManager gm)
+    {
+        if (_prodded == null) return;
+        if (_prodded.IsDead)
+        {
+            Debug.Log("CONTENT step3: толкнутый червь погиб — улетел так улетел");
+            return;
+        }
+
+        float moved = (_prodded.transform.position.x - _prodFrom) * _prodDir;
+        Debug.Log($"CONTENT step3: толкнутый уехал на {moved:0.00} юнита");
+        if (moved < 0.6f) Fail($"толчок сдвинул червя всего на {moved:0.00} юнита");
     }
 
     // --- верёвка -----------------------------------------------------------

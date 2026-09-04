@@ -5,7 +5,7 @@ public enum WeaponKind
     Bazooka, Homing, Mortar, Grenade, Cluster, Banana,
     Shotgun, Uzi, FirePunch, Bat,
     Dynamite, Mine, Sheep, AirStrike,
-    Rope, Teleport
+    Rope, Teleport, Prod
 }
 
 /// Как оружие применяется. От этого зависит и ввод (набор силы или одно нажатие),
@@ -46,8 +46,9 @@ public class Weapon
     /// стоит на месте с тем же стволом и может перецелиться (дробовик).
     public bool AutoBurst;
 
-    /// Снаряжение, а не оружие: верёвка и телепорт никого не убивают.
-    /// Верёвка вдобавок не заканчивает ход — с неё можно ещё и выстрелить.
+    /// Снаряжение, а не оружие: верёвка, телепорт и толчок никого не убивают.
+    /// Верёвка и толчок вдобавок не заканчивают ход — после них можно ещё и
+    /// выстрелить.
     public bool Utility;
 
     public Color Color;
@@ -88,7 +89,13 @@ public class Weapon
         new Weapon { Kind = WeaponKind.AirStrike,Name = "Налёт",    Use = WeaponUse.Strike, BlastRadius = 2.2f, Damage = 28f, Burst = 5, Color = new Color(0.45f, 0.55f, 0.7f), Ammo = 1 },
 
         new Weapon { Kind = WeaponKind.Rope,     Name = "Верёвка",  Use = WeaponUse.Rope,     Utility = true, Color = new Color(0.72f, 0.68f, 0.62f), Ammo = 3 },
-        new Weapon { Kind = WeaponKind.Teleport, Name = "Телепорт", Use = WeaponUse.Teleport, Utility = true, Color = new Color(0.65f, 0.45f, 0.95f), Ammo = 2 }
+        new Weapon { Kind = WeaponKind.Teleport, Name = "Телепорт", Use = WeaponUse.Teleport, Utility = true, Color = new Color(0.65f, 0.45f, 0.95f), Ammo = 2 },
+
+        // Толчок стоит последним, в ряду со снаряжением, а не среди кулака и
+        // биты: урона у него нет, ход он не заканчивает и не кончается сам.
+        // Место в конце списка выбрано ещё и затем, чтобы цифровые клавиши
+        // 1-9 и 0 остались за прежними десятью стволами.
+        new Weapon { Kind = WeaponKind.Prod,     Name = "Толчок",   Use = WeaponUse.Melee,    Utility = true, BlastRadius = 0f, Damage = 0f, Color = new Color(0.95f, 0.82f, 0.62f), Ammo = -1 }
     };
 
     /// Индекс в All по типу — чтобы ящик с припасами и меню не искали его руками.

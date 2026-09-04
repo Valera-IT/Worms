@@ -30,6 +30,9 @@ public class TouchInput : IHumanInput
     public bool FireReleased { get; private set; }
     public int WeaponRequest => -1;
     public int WeaponCycle => 0;
+    // Оружие и выбор червя на касаниях выбираются кнопками HUD, а не жестом:
+    // они идут прямо в GameManager через GameInput.Request*.
+    public bool SelectWormPressed => false;
 
     public float ZoomDelta { get; private set; }
     public Vector2 PanDelta { get; private set; }

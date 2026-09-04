@@ -120,6 +120,9 @@ public class BotInput : IGameInput
     public bool FireReleased { get { Tick(); return _fireReleased; } }
     public int WeaponRequest { get { Tick(); return _wantWeapon; } }
     public int WeaponCycle { get { Tick(); return 0; } }
+    // Бот играет тем червём, до которого дошла очередь: выбор своего червя —
+    // это про то, чем игроку удобнее ходить, и в его расчёт не входит.
+    public bool SelectWormPressed => false;
 
     /// Раз в кадр, кто бы ни спросил первым, — тот же приём, что у роутера GameInput.
     void Tick()

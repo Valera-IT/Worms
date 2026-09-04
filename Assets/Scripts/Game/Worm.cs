@@ -30,6 +30,14 @@ public class Worm : MonoBehaviour
     const float FallPerUnit = 5f;
     const float FallMax = 30f;
 
+    // Толчок: досягаемость короче, чем у кулака (1,7) — толкают вплотную,
+    // а не с полутора шагов. Импульс подобран так, чтобы сосед улетел примерно
+    // на свой рост и слегка вверх: на ровном месте это ничего не решает, а
+    // у кромки воды и над обрывом — решает всё.
+    const float ProdReach = 1.3f;
+    const float ProdPush = 6.5f;
+    const float ProdLift = 3.2f;
+
     Rigidbody2D _rb;
     CircleCollider2D _col;
     Transform _art;               // тело и черты вместе — их и разворачиваем по Facing
@@ -49,12 +57,18 @@ public class Worm : MonoBehaviour
     float _restTime;              // сколько червь стоит без дела — после чего примерзает
     float _fallPeak = float.NaN;  // высшая точка текущего полёта; NaN — падение не считаем
     bool _frozen;                 // покой: тело зажато связями, толкнуть его нельзя
+    bool _acted;                  // червь уже походил: сменить его на другого нельзя
     float _bubbleTimer;
     int _lastWeapon = -1;
     Rope _rope;
     int _gen;
 
     public bool IsActive => GameManager.I != null && GameManager.I.ActiveWorm == this;
+
+    /// Червь уже сделал в этом ходу что-то необратимое: сходил, прыгнул,
+    /// выстрелил, толкнул соседа или бросил верёвку. До этого мига ход можно
+    /// передать другому червю команды (GameManager.SelectNextWorm), после — нет.
+    public bool HasActed => _acted || _hasFiredThisTurn;
     public Vector2 Velocity => _rb != null ? _rb.linearVelocity : Vector2.zero;
     public float Charge => _charge;
     public bool IsCharging => _charging;
@@ -110,6 +124,7 @@ public class Worm : MonoBehaviour
     {
         Wake();
         _hasFiredThisTurn = false;
+        _acted = false;
         _burstLeft = 0;
         _charge = 0f;
         _charging = false;
@@ -380,6 +395,10 @@ public class Worm : MonoBehaviour
         float h = Mathf.Clamp(input.Move, -1f, 1f);
         if (Mathf.Abs(h) > 0.01f) Facing = h > 0 ? 1 : -1;
 
+        // Первое же осмысленное действие закрывает окно выбора червя: шаг,
+        // прыжок и выстрел уже нельзя отыграть назад, а прицел — можно.
+        if (Mathf.Abs(h) > 0.01f || input.JumpPressed) _acted = true;
+
         bool roped = Roped;
         bool grounded = !roped && Grounded;
 
@@ -466,7 +485,11 @@ public class Worm : MonoBehaviour
                 return;
 
             case WeaponUse.Melee:
-                if (input.FirePressed) Strike(weapon);
+                if (input.FirePressed)
+                {
+                    if (weapon.Kind == WeaponKind.Prod) Prod(weapon);
+                    else Strike(weapon);
+                }
                 return;
 
             case WeaponUse.Drop:
@@ -501,6 +524,7 @@ public class Worm : MonoBehaviour
         _rope = Rope.Of(this);
         if (!_rope.Throw(AimDirection)) return;
 
+        _acted = true;
         GameManager.I.ConsumeAmmo(w.Kind);
     }
 
@@ -679,6 +703,49 @@ public class Worm : MonoBehaviour
         if (hit == 0) Fx.FloatingText(transform.position + Vector3.up * 0.8f, "мимо", new Color(1f, 0.85f, 0.4f));
 
         GameManager.I.OnWeaponFired();
+    }
+
+    /// Толчок: сосед улетает с места, здоровье не трогаем. Патрон не тратится и
+    /// ход не заканчивается — как в оригинале, где толчок был способом решить
+    /// дело, не стреляя: у воды и над обрывом он стоит целого червя, а на ровном
+    /// месте не стоит ничего. Толкаем ближайшего, кто стоит вплотную и спереди,
+    /// поэтому в куче червей улетает один, а не все сразу.
+    /// Возвращает того, кого толкнули, или null — промах.
+    public Worm Prod(Weapon w)
+    {
+        _acted = true;
+
+        Vector2 origin = (Vector2)transform.position + new Vector2(Facing * 0.6f, 0f);
+        var worms = GameManager.I.AllWorms();
+        Worm victim = null;
+        float nearest = float.MaxValue;
+        for (int i = 0; i < worms.Count; i++)
+        {
+            var v = worms[i];
+            if (v == null || v.IsDead || v == this) continue;
+            Vector2 d = (Vector2)v.transform.position - origin;
+            // Толкают вперёд: тот, кто за спиной, не считается.
+            if (d.x * Facing < -0.1f) continue;
+            float dist = d.magnitude;
+            if (dist > ProdReach || dist >= nearest) continue;
+            nearest = dist;
+            victim = v;
+        }
+
+        Fx.Splash(origin + new Vector2(Facing * 0.35f, 0f), w.Color, 6, 0.18f);
+        if (victim == null)
+        {
+            Fx.FloatingText(transform.position + Vector3.up * 0.8f, "мимо", new Color(1f, 0.85f, 0.4f));
+            Sfx.Step();
+            return null;
+        }
+
+        // Knockback первым делом зовёт Wake: сосед в покое зажат связями
+        // (Settle → Freeze), и без расковки импульс не сдвинул бы его ни на
+        // пиксель — толчок выглядел бы сломанным.
+        victim.Knockback(new Vector2(Facing * ProdPush, ProdLift));
+        Sfx.Thud();
+        return victim;
     }
 
     /// Динамит, мина и овца кладутся под ноги. Мина остаётся на карте и после
