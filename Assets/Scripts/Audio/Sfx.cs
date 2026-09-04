@@ -10,7 +10,8 @@ public static class Sfx
     public enum Sound
     {
         Shot, Shotgun, Explosion, Splash, Step, Jump, Bounce, Thud,
-        CrateDrop, Pickup, RopeShot, RopeHit, Teleport, TurnStart, Flood, Bye
+        CrateDrop, Pickup, RopeShot, RopeHit, Teleport, TurnStart, Flood, Bye,
+        Drill
     }
 
     /// 0..1 из настроек. Общий AudioListener.volume мы не трогаем: он приглушил бы
@@ -33,6 +34,7 @@ public static class Sfx
     public static void Jump() => Play(Sound.Jump, 0.5f, Random.Range(0.95f, 1.1f));
     public static void Bounce() => Play(Sound.Bounce, 0.45f, Random.Range(0.9f, 1.15f));
     public static void Thud() => Play(Sound.Thud, 0.75f, Random.Range(0.92f, 1.08f));
+    public static void Drill() => Play(Sound.Drill, 0.7f, Random.Range(0.97f, 1.04f));
     public static void CrateDrop() => Play(Sound.CrateDrop, 0.7f);
     public static void Pickup() => Play(Sound.Pickup, 0.8f);
     public static void RopeShot() => Play(Sound.RopeShot, 0.6f, Random.Range(0.95f, 1.08f));
@@ -124,6 +126,7 @@ public static class Sfx
         Sound.Jump => MakeJump(),
         Sound.Bounce => MakeBounce(),
         Sound.Thud => MakeThud(),
+        Sound.Drill => MakeDrill(),
         Sound.CrateDrop => MakeCrateDrop(),
         Sound.Pickup => MakePickup(),
         Sound.RopeShot => MakeRopeShot(),
@@ -231,6 +234,22 @@ public static class Sfx
         return Synth.Build("sfx_thud", 0.26f, t =>
             osc.Sin(Mathf.Lerp(150f, 62f, Mathf.Clamp01(t / 0.12f))) * Synth.Env(t, 0.002f, 0.12f) * 0.8f
             + noise.Next() * Synth.Env(t, 0.001f, 0.05f) * 0.35f);
+    }
+
+    /// Бур и паяльная лампа: дребезжащий мотор — низкий тон, у которого высота
+    /// сама дрожит на тридцати герцах, — и шум щебня поверх. Один взрыв здесь не
+    /// годится: рез длится, и звук обязан длиться вместе с ним.
+    static AudioClip MakeDrill()
+    {
+        var osc = new Synth.Osc();
+        var noise = new Synth.Noise(4421);
+        return Synth.Build("sfx_drill", 0.7f, t =>
+        {
+            float wobble = 1f + 0.18f * Mathf.Sin(t * 2f * Mathf.PI * 30f);
+            float body = osc.Saw(115f * wobble) * Synth.Env(t, 0.02f, 0.12f) * 0.5f;
+            float grit = noise.Next() * Synth.Env(t, 0.03f, 0.15f) * 0.3f;
+            return body + grit;
+        });
     }
 
     /// Ящик пошёл вниз: тихий двойной сигнал, чтобы взгляд успел найти парашют.

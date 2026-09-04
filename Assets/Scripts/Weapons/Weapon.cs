@@ -5,7 +5,9 @@ public enum WeaponKind
     Bazooka, Homing, Mortar, Grenade, Cluster, Banana,
     Shotgun, Uzi, FirePunch, Bat,
     Dynamite, Mine, Sheep, AirStrike,
-    Rope, Teleport, Prod
+    Rope, Teleport, Prod,
+    Drill, Blowtorch, Girder,
+    Parachute, Jetpack
 }
 
 /// Как оружие применяется. От этого зависит и ввод (набор силы или одно нажатие),
@@ -19,7 +21,11 @@ public enum WeaponUse
     Drop,       // положить под ноги
     Strike,     // налёт по указанной точке
     Rope,
-    Teleport
+    Teleport,
+    Dig,        // прорезать коридор в породе (бур, паяльная лампа)
+    Build,      // добавить породу (балка)
+    Chute,      // парашют: раскрыть в полёте
+    Jet         // реактивный ранец: тяга, пока держат кнопку
 }
 
 /// Описание оружия. Держим в статическом массиве — прототипу хватает.
@@ -28,7 +34,12 @@ public class Weapon
     public WeaponKind Kind;
     public string Name;
     public WeaponUse Use = WeaponUse.Charged;
-    public float LaunchSpeed;     // максимальная скорость при полном заряде
+    /// Максимальная скорость при полном заряде. Полная полоса силы бросает
+    /// через полкарты: при гравитации 24 юнита в секунду за секунду дальность
+    /// по ровному месту равна v²/g, и прежние 28 у базуки давали всего
+    /// тридцать три юнита на карте шириной девяносто шесть — с острова на
+    /// остров было не добросить ни при каком угле.
+    public float LaunchSpeed;
     public float BlastRadius;     // радиус воронки в юнитах
     public float Damage;          // урон в эпицентре
     public float Fuse;            // время до взрыва (0 = взрыв при взведении не нужен)
@@ -40,6 +51,16 @@ public class Weapon
     public int Cluster;           // на сколько осколков рассыпается при взрыве
     public int Burst = 1;         // сколько выстрелов в очереди у мгновенного оружия
     public float Spread;          // разброс очереди в градусах
+
+    /// Длина реза и его радиус для WeaponUse.Dig, в юнитах.
+    public float DigLength;
+    public float DigRadius;
+
+    /// Бур режет строго вниз, лампа — по прицелу.
+    public bool DigDown;
+
+    /// Сколько секунд тяги у ранца.
+    public float Fuel;
 
     /// Вся очередь уходит одним нажатием, пулями подряд во времени (узи).
     /// Иначе каждый выстрел очереди — отдельное нажатие, и между ними червь
@@ -67,16 +88,17 @@ public class Weapon
                            || Use == WeaponUse.Strike  || Use == WeaponUse.Melee
                            || Use == WeaponUse.Drop);
 
-    /// Арсенал первых «Червей» 1995 года — без инструментов для перекапывания
-    /// ландшафта (сварка, дрель, балка): они требуют своей работы с породой.
+    /// Арсенал первых «Червей» 1995 года. Инструменты для перекапывания
+    /// ландшафта (бур, паяльная лампа, балка) добавлены шагом 3 «что дальше»:
+    /// они режут и достраивают породу, а не рвут её воронкой.
     public static readonly Weapon[] All =
     {
-        new Weapon { Kind = WeaponKind.Bazooka,  Name = "Базука",   LaunchSpeed = 28f, BlastRadius = 3.0f, Damage = 45f, AffectedByWind = true,  Color = new Color(0.85f, 0.25f, 0.2f),  Ammo = -1 },
-        new Weapon { Kind = WeaponKind.Homing,   Name = "Ракета",   LaunchSpeed = 22f, BlastRadius = 2.8f, Damage = 40f, Homing = true,          Color = new Color(0.95f, 0.45f, 0.15f), Ammo = 2  },
-        new Weapon { Kind = WeaponKind.Mortar,   Name = "Миномёт",  LaunchSpeed = 24f, BlastRadius = 1.8f, Damage = 20f, AffectedByWind = true,  Cluster = 4, Color = new Color(0.55f, 0.6f, 0.65f), Ammo = 3 },
-        new Weapon { Kind = WeaponKind.Grenade,  Name = "Граната",  LaunchSpeed = 24f, BlastRadius = 3.4f, Damage = 50f, Fuse = 3.5f, Bouncy = true, Color = new Color(0.35f, 0.7f, 0.3f), Ammo = -1 },
-        new Weapon { Kind = WeaponKind.Cluster,  Name = "Кассета",  LaunchSpeed = 26f, BlastRadius = 2.2f, Damage = 25f, AffectedByWind = true,  Cluster = 5, Color = new Color(0.95f, 0.75f, 0.2f), Ammo = 4 },
-        new Weapon { Kind = WeaponKind.Banana,   Name = "Банан",    LaunchSpeed = 24f, BlastRadius = 3.2f, Damage = 45f, Fuse = 4f, Bouncy = true, Cluster = 5, Color = new Color(0.98f, 0.85f, 0.25f), Ammo = 1 },
+        new Weapon { Kind = WeaponKind.Bazooka,  Name = "Базука",   LaunchSpeed = 56f, BlastRadius = 3.0f, Damage = 45f, AffectedByWind = true,  Color = new Color(0.85f, 0.25f, 0.2f),  Ammo = -1 },
+        new Weapon { Kind = WeaponKind.Homing,   Name = "Ракета",   LaunchSpeed = 44f, BlastRadius = 2.8f, Damage = 40f, Homing = true,          Color = new Color(0.95f, 0.45f, 0.15f), Ammo = 2  },
+        new Weapon { Kind = WeaponKind.Mortar,   Name = "Миномёт",  LaunchSpeed = 48f, BlastRadius = 1.8f, Damage = 20f, AffectedByWind = true,  Cluster = 4, Color = new Color(0.55f, 0.6f, 0.65f), Ammo = 3 },
+        new Weapon { Kind = WeaponKind.Grenade,  Name = "Граната",  LaunchSpeed = 48f, BlastRadius = 3.4f, Damage = 50f, Fuse = 3.5f, Bouncy = true, Color = new Color(0.35f, 0.7f, 0.3f), Ammo = -1 },
+        new Weapon { Kind = WeaponKind.Cluster,  Name = "Кассета",  LaunchSpeed = 52f, BlastRadius = 2.2f, Damage = 25f, AffectedByWind = true,  Cluster = 5, Color = new Color(0.95f, 0.75f, 0.2f), Ammo = 4 },
+        new Weapon { Kind = WeaponKind.Banana,   Name = "Банан",    LaunchSpeed = 48f, BlastRadius = 3.2f, Damage = 45f, Fuse = 4f, Bouncy = true, Cluster = 5, Color = new Color(0.98f, 0.85f, 0.25f), Ammo = 1 },
 
         new Weapon { Kind = WeaponKind.Shotgun,  Name = "Дробовик", Use = WeaponUse.Hitscan, BlastRadius = 1.6f, Damage = 15f, Burst = 2, Spread = 2.5f, Color = new Color(0.9f, 0.9f, 0.6f), Ammo = 3 },
         new Weapon { Kind = WeaponKind.Uzi,      Name = "Узи",      Use = WeaponUse.Hitscan, BlastRadius = 0.6f, Damage = 5f,  Burst = 8, Spread = 7f, AutoBurst = true, Color = new Color(0.75f, 0.75f, 0.8f), Ammo = 2 },
@@ -95,7 +117,21 @@ public class Weapon
         // биты: урона у него нет, ход он не заканчивает и не кончается сам.
         // Место в конце списка выбрано ещё и затем, чтобы цифровые клавиши
         // 1-9 и 0 остались за прежними десятью стволами.
-        new Weapon { Kind = WeaponKind.Prod,     Name = "Толчок",   Use = WeaponUse.Melee,    Utility = true, BlastRadius = 0f, Damage = 0f, Color = new Color(0.95f, 0.82f, 0.62f), Ammo = -1 }
+        new Weapon { Kind = WeaponKind.Prod,     Name = "Толчок",   Use = WeaponUse.Melee,    Utility = true, BlastRadius = 0f, Damage = 0f, Color = new Color(0.95f, 0.82f, 0.62f), Ammo = -1 },
+
+        // Инструменты земли. Урона у них нет, поэтому бот их не берёт
+        // (BotCanUse требует Damage > 0), а ход они заканчивают, как оружие:
+        // прокопался — и отходи, иначе бур стал бы бесплатным способом
+        // разъехаться по карте на любое расстояние.
+        new Weapon { Kind = WeaponKind.Drill,     Name = "Бур",      Use = WeaponUse.Dig,   Utility = true, DigLength = 5.5f, DigRadius = 0.62f, DigDown = true, Color = new Color(0.72f, 0.74f, 0.8f),  Ammo = 3 },
+        new Weapon { Kind = WeaponKind.Blowtorch, Name = "Лампа",    Use = WeaponUse.Dig,   Utility = true, DigLength = 6.5f, DigRadius = 0.58f, Color = new Color(0.98f, 0.66f, 0.25f), Ammo = 3 },
+        new Weapon { Kind = WeaponKind.Girder,    Name = "Балка",    Use = WeaponUse.Build, Utility = true, Color = new Color(0.62f, 0.66f, 0.72f), Ammo = 4 },
+
+        // Средства передвижения по воздуху. Ход не заканчивают: парашют спасает
+        // падение, из которого ещё надо успеть выстрелить, а ранец — способ
+        // добраться до позиции, а не сам ход.
+        new Weapon { Kind = WeaponKind.Parachute, Name = "Парашют", Use = WeaponUse.Chute, Utility = true, Color = new Color(0.85f, 0.9f, 0.98f), Ammo = 2 },
+        new Weapon { Kind = WeaponKind.Jetpack,   Name = "Ранец",   Use = WeaponUse.Jet,   Utility = true, Fuel = 3.2f, Color = new Color(0.95f, 0.6f, 0.35f), Ammo = 1 }
     };
 
     /// Индекс в All по типу — чтобы ящик с припасами и меню не искали его руками.

@@ -470,6 +470,120 @@ public class DestructibleTerrain : MonoBehaviour
         }
     }
 
+    /// Рез вдоль отрезка: убирает породу в капсуле радиусом worldRadius.
+    /// Бур и паяльная лампа копают коридор, а не воронку, — кругом такой
+    /// проход пришлось бы набивать десятком взрывов, и каждый стоил бы своей
+    /// пересборки коллайдера. Копоти по краям нет: это рез, а не взрыв.
+    /// Возвращает true, если хоть один пиксель убран.
+    public bool Dig(Vector2 from, Vector2 to, float worldRadius)
+    {
+        float ax = from.x * PixelsPerUnit, ay = from.y * PixelsPerUnit;
+        float bx = to.x * PixelsPerUnit, by = to.y * PixelsPerUnit;
+        float r = worldRadius * PixelsPerUnit;
+
+        int x0 = Mathf.Max(0, Mathf.FloorToInt(Mathf.Min(ax, bx) - r) - 1);
+        int x1 = Mathf.Min(W - 1, Mathf.CeilToInt(Mathf.Max(ax, bx) + r) + 1);
+        int y0 = Mathf.Max(0, Mathf.FloorToInt(Mathf.Min(ay, by) - r) - 1);
+        int y1 = Mathf.Min(H - 1, Mathf.CeilToInt(Mathf.Max(ay, by) + r) + 1);
+        if (x0 > x1 || y0 > y1) return false;
+
+        float ex = bx - ax, ey = by - ay;
+        float len2 = ex * ex + ey * ey;
+        float r2 = r * r;
+
+        int dx0 = int.MaxValue, dy0 = int.MaxValue, dx1 = int.MinValue, dy1 = int.MinValue;
+
+        for (int y = y0; y <= y1; y++)
+        {
+            int row = y * W;
+            for (int x = x0; x <= x1; x++)
+            {
+                int i = row + x;
+                if (!_solid[i]) continue;
+
+                // Расстояние до отрезка: проекция, зажатая в его концы.
+                float t = len2 > 0.0001f ? ((x - ax) * ex + (y - ay) * ey) / len2 : 0f;
+                t = Mathf.Clamp01(t);
+                float px = ax + ex * t - x, py = ay + ey * t - y;
+                if (px * px + py * py > r2) continue;
+
+                _solid[i] = false;
+                _grass[i] = false;
+                _scorch[i] = false;
+                _hasDecal[i] = false;
+
+                if (x < dx0) dx0 = x;
+                if (x > dx1) dx1 = x;
+                if (y < dy0) dy0 = y;
+                if (y > dy1) dy1 = y;
+            }
+        }
+
+        if (dx1 < dx0) return false;
+
+        RepaintRect(dx0, dy0, dx1, dy1);
+        UploadRect(dx0, dy0, dx1, dy1);
+        RebuildChunksIn(dx0, dy0, dx1, dy1);
+        return true;
+    }
+
+    /// Балка: прямоугольник породы под углом, вписанный в маску тем же слоем
+    /// украшений, что и деревья, — поэтому она держит червя, ловит снаряд и
+    /// рвётся воронкой наравне с землёй, а цветом остаётся металлом.
+    /// Возвращает true, если балка встала.
+    public bool StampBeam(Vector2 center, float angleDeg, float length, float thickness, Color32 color)
+    {
+        float cx = center.x * PixelsPerUnit, cy = center.y * PixelsPerUnit;
+        float half = length * 0.5f * PixelsPerUnit;
+        float halfT = thickness * 0.5f * PixelsPerUnit;
+        float a = angleDeg * Mathf.Deg2Rad;
+        float ca = Mathf.Cos(a), sa = Mathf.Sin(a);
+
+        int reach = Mathf.CeilToInt(half + halfT) + 1;
+        int x0 = Mathf.Max(0, Mathf.FloorToInt(cx) - reach);
+        int x1 = Mathf.Min(W - 1, Mathf.CeilToInt(cx) + reach);
+        int y0 = Mathf.Max(0, Mathf.FloorToInt(cy) - reach);
+        int y1 = Mathf.Min(H - 1, Mathf.CeilToInt(cy) + reach);
+        if (x0 > x1 || y0 > y1) return false;
+
+        // Тёмная кромка по длинной стороне — иначе балка сливается с породой.
+        var edge = (Color32)Color.Lerp(color, Color.black, 0.45f);
+
+        int dx0 = int.MaxValue, dy0 = int.MaxValue, dx1 = int.MinValue, dy1 = int.MinValue;
+
+        for (int y = y0; y <= y1; y++)
+        {
+            int row = y * W;
+            for (int x = x0; x <= x1; x++)
+            {
+                // В систему координат балки: вдоль и поперёк.
+                float ox = x - cx, oy = y - cy;
+                float along = ox * ca + oy * sa;
+                float across = -ox * sa + oy * ca;
+                if (Mathf.Abs(along) > half || Mathf.Abs(across) > halfT) continue;
+
+                int i = row + x;
+                _solid[i] = true;
+                _grass[i] = false;
+                _scorch[i] = false;
+                _decal[i] = Mathf.Abs(across) > halfT - 1.2f ? edge : color;
+                _hasDecal[i] = true;
+
+                if (x < dx0) dx0 = x;
+                if (x > dx1) dx1 = x;
+                if (y < dy0) dy0 = y;
+                if (y > dy1) dy1 = y;
+            }
+        }
+
+        if (dx1 < dx0) return false;
+
+        RepaintRect(dx0, dy0, dx1, dy1);
+        UploadRect(dx0, dy0, dx1, dy1);
+        RebuildChunksIn(dx0, dy0, dx1, dy1);
+        return true;
+    }
+
     /// Перекрашивает прямоугольник маски в буфер пикселей.
     void RepaintRect(int x0, int y0, int x1, int y1)
     {

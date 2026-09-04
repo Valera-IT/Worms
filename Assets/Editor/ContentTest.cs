@@ -141,7 +141,165 @@ public static class ContentTest
         if (_step == 7 && t > 9.5) { _step = 8; DropCrates(gm); }
         if (_step == 8 && t > 14.0) { _step = 9; CheckCrates(gm); }
         if (_step == 9 && t > 21.5) { _step = 10; CheckFlood(gm); }
-        if (_step == 10 && t > 24.5) { _step = 11; CheckDrowned(gm); Finish(); }
+        if (_step == 10 && t > 24.5) { _step = 11; CheckDrowned(gm); }
+        if (_step == 11 && t > 25.0) { _step = 12; CheckTools(gm); }
+        if (_step == 12 && t > 25.5) { _step = 13; ChuteDrop(gm); }
+        if (_step == 13 && t > 25.9) { _step = 14; OpenChute(gm); }
+        if (_step == 14 && t > 27.2) { _step = 15; CheckChute(gm); Finish(); }
+    }
+
+    // --- парашют и ранец ---------------------------------------------------
+
+    static Worm _flier;
+    static float _flierHealth;
+
+    /// Роняем червя с высоты, где падение без купола стоило бы здоровья.
+    static void ChuteDrop(GameManager gm)
+    {
+        var worms = gm.AllWorms();
+        _flier = null;
+        for (int i = 0; i < worms.Count && _flier == null; i++)
+            if (worms[i] != null && !worms[i].IsDead) _flier = worms[i];
+
+        if (_flier == null) { Debug.Log("CONTENT step13: живых червей не осталось — парашют пропускаем"); return; }
+
+        var terrain = gm.Terrain;
+        Vector2 spot = Vector2.zero;
+        bool found = false;
+        for (float x = 8f; x < DestructibleTerrain.WorldWidth - 8f && !found; x += 2f)
+        {
+            float surf = terrain.SurfaceHeightWorld(x);
+            if (surf <= DestructibleTerrain.WaterLevel + 2f) continue;
+
+            bool clear = true;
+            for (float dy = 1f; dy <= 14f && clear; dy += 0.5f)
+                clear = !terrain.IsSolidWorld(new Vector2(x, surf + dy));
+            if (!clear) continue;
+
+            spot = new Vector2(x, surf + 14f);
+            found = true;
+        }
+
+        if (!found) { _flier = null; Debug.Log("CONTENT step13: нет колонки с высотой под падение — парашют пропускаем"); return; }
+
+        _flier.Heal(100f);
+        _flierHealth = _flier.Health;
+        _flier.PlaceAt(spot);
+        Debug.Log($"CONTENT step13: роняем {_flier.WormName} с {spot.y:0.0} (здоровье {_flierHealth:0})");
+    }
+
+    /// Купол раскрываем уже в падении: на месте он и не должен раскрываться.
+    static void OpenChute(GameManager gm)
+    {
+        if (_flier == null || _flier.IsDead) return;
+
+        var chute = Weapon.All[Weapon.IndexOf(WeaponKind.Parachute)];
+        _flier.OpenChute(chute);
+        if (!_flier.Chuting) Fail("парашют не раскрылся в падении");
+    }
+
+    /// Под куполом снижение медленное, а урона за приземление нет вовсе.
+    /// Ранец проверяем состоянием: тяга живёт на удержании кнопки, которого
+    /// в headless-прогоне нет, — её смотрят руками.
+    static void CheckChute(GameManager gm)
+    {
+        if (_flier == null || _flier.IsDead)
+        {
+            Debug.Log("CONTENT step15: подопытный не дожил — парашют не мерим");
+            return;
+        }
+
+        float vy = _flier.Velocity.y;
+        if (vy < -4.2f) Fail($"под куполом снижение {vy:0.0} — купол не держит");
+        if (_flier.Health < _flierHealth - 0.5f)
+            Fail($"под куполом сняли здоровье: {_flierHealth:0} → {_flier.Health:0}");
+
+        var jet = Weapon.All[Weapon.IndexOf(WeaponKind.Jetpack)];
+        _flier.StartJet(jet);
+        if (!_flier.Jetting) Fail("ранец не включился");
+        _flier.StopJet();
+
+        Debug.Log($"CONTENT step15: снижение {vy:0.0} юнита/с, здоровье {_flier.Health:0}, ранец включается");
+    }
+
+    // --- инструменты земли -------------------------------------------------
+
+    /// Бур, паяльная лампа и балка правят не червей, а породу, поэтому меряем
+    /// саму маску: рез обязан оставить сквозной коридор, балка — сплошную плиту
+    /// в пустоте. Заодно сверяем, что бот их в руки не берёт: урона у них нет,
+    /// а перебор «угол и сила» для лопаты бессмысленен.
+    static void CheckTools(GameManager gm)
+    {
+        var terrain = gm.Terrain;
+
+        // Ищем толщу породы: колонка, где под поверхностью подряд лежит камень.
+        Vector2 deep = Vector2.zero;
+        bool found = false;
+        for (float x = 8f; x < DestructibleTerrain.WorldWidth - 8f && !found; x += 2f)
+        {
+            float surf = terrain.SurfaceHeightWorld(x);
+            if (surf <= DestructibleTerrain.WaterLevel + 2f) continue;
+            var probe = new Vector2(x, surf - 1.2f);
+            if (!terrain.IsSolidWorld(probe)) continue;
+            deep = probe;
+            found = true;
+        }
+
+        if (!found) { Fail("не нашлось толщи породы под рез"); return; }
+
+        // Рез вбок на четыре юнита: и начало, и конец обязаны стать пустыми.
+        var from = deep;
+        var to = deep + new Vector2(4f, 0f);
+        bool cut = terrain.Dig(from, to, 0.6f);
+        if (!cut) { Fail("рез не тронул породу"); return; }
+
+        int stillSolid = 0;
+        for (float k = 0f; k <= 1.001f; k += 0.1f)
+            if (terrain.IsSolidWorld(Vector2.Lerp(from, to, k))) stillSolid++;
+        if (stillSolid > 0) Fail($"после реза коридор не сквозной: {stillSolid} точек из 11 в породе");
+
+        // Балка в пустоте. Место ищем по всей карте, а не над одной колонкой:
+        // в пещере над полом кровля, и «просто повыше» пустоты не гарантирует.
+        Vector2 air = Vector2.zero;
+        bool space = false;
+        for (float x = 8f; x < DestructibleTerrain.WorldWidth - 8f && !space; x += 2f)
+            for (float y = DestructibleTerrain.WaterLevel + 3f;
+                 y < DestructibleTerrain.WorldHeight - 3f && !space; y += 1f)
+            {
+                var probe = new Vector2(x, y);
+                bool clear = true;
+                for (float dx = -2.4f; dx <= 2.4f && clear; dx += 0.4f)
+                    clear = !terrain.IsSolidWorld(probe + new Vector2(dx, 0f));
+                if (!clear) continue;
+                air = probe;
+                space = true;
+            }
+
+        if (!space) { Fail("не нашлось пустоты под балку"); return; }
+
+        int pathsBefore = terrain.ColliderPathCount;
+        if (!terrain.StampBeam(air, 0f, 4.2f, 0.55f, new Color32(150, 158, 170, 255)))
+        { Fail("балка не встала"); return; }
+
+        // Пробы считаем целым счётчиком: `for (float dx = -1.8f; dx <= 1.8f; dx += 0.6f)`
+        // на седьмом шаге даёт 1.8000001 и молча его пропускает.
+        int onBeam = 0;
+        for (int k = 0; k <= 6; k++)
+            if (terrain.IsSolidWorld(air + new Vector2(-1.8f + 0.6f * k, 0f))) onBeam++;
+        if (onBeam < 7) Fail($"балка дырявая: сплошных точек {onBeam} из 7");
+        if (terrain.ColliderPathCount <= pathsBefore)
+            Fail("балка не попала в коллайдер: контуров не прибавилось");
+
+        // Инструменты — снаряжение без урона, бот их не берёт.
+        foreach (var kind in new[] { WeaponKind.Drill, WeaponKind.Blowtorch, WeaponKind.Girder })
+        {
+            var w = Weapon.All[Weapon.IndexOf(kind)];
+            if (w.Damage != 0f) Fail($"{w.Name}: урон {w.Damage}, инструмент не должен бить");
+            if (w.BotCanUse) Fail($"{w.Name}: бот берёт инструмент в руки");
+        }
+
+        Debug.Log($"CONTENT step12: рез {stillSolid} точек в породе из 11, балка {onBeam} из 7, " +
+                  $"контуров {pathsBefore} → {terrain.ColliderPathCount}");
     }
 
     // --- звук --------------------------------------------------------------

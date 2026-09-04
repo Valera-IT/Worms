@@ -53,6 +53,11 @@ public static class WeaponIcons
             WeaponKind.AirStrike => AirStrike(),
             WeaponKind.Rope => RopeIcon(),
             WeaponKind.Prod => ProdIcon(),
+            WeaponKind.Drill => DrillIcon(),
+            WeaponKind.Blowtorch => TorchIcon(),
+            WeaponKind.Girder => GirderIcon(),
+            WeaponKind.Parachute => ChuteIcon(),
+            WeaponKind.Jetpack => JetIcon(),
             _ => TeleportIcon()
         };
 
@@ -281,6 +286,119 @@ public static class WeaponIcons
         var air = new Color32(236, 236, 240, 255);
         p.Rect(38, 33, 8, 3, air);
         p.Rect(36, 12, 8, 3, air);
+        return p;
+    }
+
+    /// Парашют: купол дольками, стропы и груз под ними.
+    static Pix ChuteIcon()
+    {
+        var p = new Pix(S, S);
+        var cloth = new Color32(228, 234, 244, 255);
+        var clothDark = new Color32(176, 188, 208, 255);
+        var cord = new Color32(96, 90, 82, 255);
+        var load = new Color32(140, 96, 60, 255);
+
+        p.Disc(24f, 26f, 16f, cloth);           // купол
+        p.Rect(0, 4, S, 22, Pix.Clear);         // низ купола срезаем — остаётся арка
+        p.Rect(16, 24, 6, 14, clothDark);       // дольки
+        p.Rect(28, 24, 6, 14, clothDark);
+
+        p.Line(9f, 26f, 20f, 13f, 1.5f, cord);  // стропы
+        p.Line(39f, 26f, 28f, 13f, 1.5f, cord);
+        p.Line(24f, 26f, 24f, 13f, 1.5f, cord);
+
+        p.Rect(19, 5, 10, 8, load);             // груз
+        p.Rect(21, 8, 6, 3, new Color32(178, 130, 84, 255));
+        return p;
+    }
+
+    /// Ранец: два баллона с лямкой и струя пламени снизу.
+    static Pix JetIcon()
+    {
+        var p = new Pix(S, S);
+        var tank = new Color32(126, 134, 148, 255);
+        var tankLit = new Color32(184, 192, 206, 255);
+        var strap = new Color32(70, 62, 56, 255);
+        var flame = new Color32(250, 168, 48, 255);
+        var flameHot = new Color32(255, 236, 160, 255);
+
+        p.Rect(11, 18, 11, 24, tank);           // левый баллон
+        p.Rect(26, 18, 11, 24, tank);           // правый
+        p.Rect(13, 30, 4, 9, tankLit);
+        p.Rect(28, 30, 4, 9, tankLit);
+        p.Disc(16.5f, 42f, 5.5f, tank);         // скруглённые крышки
+        p.Disc(31.5f, 42f, 5.5f, tank);
+        p.Rect(22, 26, 4, 12, strap);           // перемычка
+
+        p.Rect(13, 12, 7, 6, flame);            // сопла и пламя
+        p.Rect(28, 12, 7, 6, flame);
+        p.Disc(16.5f, 8f, 4f, flame);
+        p.Disc(31.5f, 8f, 4f, flame);
+        p.Disc(16.5f, 10f, 2f, flameHot);
+        p.Disc(31.5f, 10f, 2f, flameHot);
+        return p;
+    }
+
+    /// Бур: корпус с рукоятью, снизу — сужающееся сверло с витком.
+    static Pix DrillIcon()
+    {
+        var p = new Pix(S, S);
+        var body = new Color32(118, 126, 140, 255);
+        var bodyLit = new Color32(176, 184, 198, 255);
+        var steel = new Color32(198, 202, 210, 255);
+        var grip = new Color32(74, 60, 48, 255);
+
+        p.Rect(14, 30, 20, 16, body);          // корпус мотора
+        p.Rect(16, 38, 8, 6, bodyLit);
+        p.Rect(30, 34, 12, 7, grip);           // рукоять вбок
+
+        p.Rect(20, 20, 8, 11, steel);          // хвостовик
+        // Сверло книзу сужается — рисуем ступеньками, чтобы остался пиксель-арт.
+        p.Rect(21, 14, 6, 6, steel);
+        p.Rect(22, 9, 4, 5, steel);
+        p.Rect(23, 5, 2, 4, steel);
+
+        // Виток спирали: две косые чёрточки потемнее.
+        p.Line(21f, 18f, 27f, 15f, 1.6f, body);
+        p.Line(22f, 12f, 26f, 10f, 1.4f, body);
+        return p;
+    }
+
+    /// Паяльная лампа: баллон, сопло и язык пламени вправо.
+    static Pix TorchIcon()
+    {
+        var p = new Pix(S, S);
+        var tank = new Color32(96, 104, 118, 255);
+        var tankLit = new Color32(150, 158, 172, 255);
+        var nozzle = new Color32(190, 194, 202, 255);
+        var flame = new Color32(250, 176, 52, 255);
+        var flameHot = new Color32(255, 232, 150, 255);
+
+        p.Rect(6, 16, 18, 16, tank);           // баллон
+        p.Rect(8, 24, 6, 6, tankLit);
+        p.Rect(24, 21, 8, 6, nozzle);          // сопло
+
+        p.Disc(36f, 24f, 7f, flame);           // пламя
+        p.Rect(31, 21, 8, 6, flame);
+        p.Disc(35f, 24f, 3.4f, flameHot);
+        p.Rect(42, 22, 4, 4, flame);
+        return p;
+    }
+
+    /// Балка: стальная плита наискось, с заклёпками по краям.
+    static Pix GirderIcon()
+    {
+        var p = new Pix(S, S);
+        var steel = new Color32(150, 158, 170, 255);
+        var steelLit = new Color32(198, 206, 216, 255);
+        var rivet = new Color32(86, 92, 104, 255);
+
+        p.Line(7f, 15f, 41f, 33f, 9f, steel);      // сама балка
+        p.Line(8f, 17f, 40f, 34f, 2.4f, steelLit); // блик по верхней кромке
+
+        p.Disc(12f, 18f, 1.8f, rivet);             // заклёпки
+        p.Disc(24f, 24f, 1.8f, rivet);
+        p.Disc(36f, 30f, 1.8f, rivet);
         return p;
     }
 

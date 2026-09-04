@@ -34,6 +34,27 @@ public class Worm : MonoBehaviour
     // а не с полутора шагов. Импульс подобран так, чтобы сосед улетел примерно
     // на свой рост и слегка вверх: на ровном месте это ничего не решает, а
     // у кромки воды и над обрывом — решает всё.
+    /// Парашют: предельная скорость снижения и снос по ветру.
+    const float ChuteFall = 3.2f;
+    const float ChuteDrift = 4.5f;
+
+    /// Ранец: тяга вверх, потолок скорости и разгон вбок.
+    const float JetLift = 34f;
+    const float JetTop = 7.5f;
+    const float JetSide = 5.5f;
+
+    /// Балка: длина, толщина и на сколько она ставится от червя.
+    const float GirderLength = 4.2f;
+    const float GirderThickness = 0.55f;
+    const float GirderReach = 3.2f;
+
+    /// Сколько секунд полоса силы идёт от нуля до полного заряда.
+    const float ChargeTime = 1.15f;
+
+    /// Ниже этого заряда отпускание считается не выстрелом, а сорвавшимся
+    /// касанием: снаряд с такой силой всё равно падает под ноги.
+    const float MinCharge = 0.12f;
+
     const float ProdReach = 1.3f;
     const float ProdPush = 6.5f;
     const float ProdLift = 3.2f;
@@ -57,6 +78,11 @@ public class Worm : MonoBehaviour
     float _restTime;              // сколько червь стоит без дела — после чего примерзает
     float _fallPeak = float.NaN;  // высшая точка текущего полёта; NaN — падение не считаем
     bool _frozen;                 // покой: тело зажато связями, толкнуть его нельзя
+    bool _chute;                  // парашют раскрыт
+    bool _jet;                    // ранец включён
+    float _fuel;                  // остаток тяги ранца в секундах
+    Transform _canopy;            // купол парашюта
+    Transform _flame;             // выхлоп ранца
     bool _acted;                  // червь уже походил: сменить его на другого нельзя
     float _bubbleTimer;
     int _lastWeapon = -1;
@@ -112,6 +138,19 @@ public class Worm : MonoBehaviour
         rb.interpolation = RigidbodyInterpolation2D.Interpolate;
         w._rb = rb;
 
+        // Купол и выхлоп висят выключенными: включаются на время полёта.
+        var canopy = Sprites.Make("Canopy", Sprites.Square, new Color(0.95f, 0.96f, 1f, 0.95f), 9, go.transform);
+        canopy.transform.localPosition = new Vector3(0f, 1.15f, 0f);
+        canopy.transform.localScale = new Vector3(2.1f, 0.42f, 1f);
+        canopy.gameObject.SetActive(false);
+        w._canopy = canopy.transform;
+
+        var flame = Sprites.Make("Jet", Sprites.Circle, new Color(1f, 0.72f, 0.25f, 0.95f), 9, go.transform);
+        flame.transform.localPosition = new Vector3(0f, -0.55f, 0f);
+        flame.transform.localScale = new Vector3(0.45f, 0.7f, 1f);
+        flame.gameObject.SetActive(false);
+        w._flame = flame.transform;
+
         var cross = Sprites.Make("Crosshair", Sprites.Circle, new Color(1f, 1f, 1f, 0.85f), 12, go.transform);
         cross.transform.localScale = Vector3.one * 0.3f;
         w._crosshair = cross.transform;
@@ -123,6 +162,8 @@ public class Worm : MonoBehaviour
     public void BeginTurn()
     {
         Wake();
+        CloseChute();
+        StopJet();
         _hasFiredThisTurn = false;
         _acted = false;
         _burstLeft = 0;
@@ -248,8 +289,10 @@ public class Worm : MonoBehaviour
     {
         if (IsDead) return;
 
-        if (Roped || transform.position.y < DestructibleTerrain.WaterLevel)
+        if (Roped || _chute || _jet || transform.position.y < DestructibleTerrain.WaterLevel)
         {
+            // Парашют и ранец гасят падение целиком: за приземление под куполом
+            // в оригинале не платят, ради этого его и держат в наборе.
             _fallPeak = float.NaN;
             return;
         }
@@ -313,6 +356,14 @@ public class Worm : MonoBehaviour
 
         Drowning();
         Settle();
+
+        // Купол и ранец тикают у каждого червя, а не только у того, чей ход:
+        // ход длится две секунды отхода, а спуск под куполом — дольше, и
+        // передача хода не должна складывать парашют в воздухе. Тяга при этом
+        // остаётся привилегией активного червя — ею управляют кнопкой.
+        ChuteTick();
+        var flyInput = active ? Controls : null;
+        JetTick(flyInput, flyInput != null ? Mathf.Clamp(flyInput.Move, -1f, 1f) : 0f);
 
         bool onGround = Grounded;
         if (!onGround) _airTime += Time.deltaTime; else _airTime = 0f;
@@ -452,6 +503,7 @@ public class Worm : MonoBehaviour
             }
         }
 
+
         // Пока дробовик не отстрелял очередь, оружие не переключить: оба выстрела
         // уходят из одного ствола.
         if (_burstLeft == 0)
@@ -499,15 +551,42 @@ public class Worm : MonoBehaviour
             case WeaponUse.Strike:
                 if (input.FirePressed) CallAirStrike(weapon);
                 return;
+
+            // Бур и паяльная лампа: прорезать коридор в породе.
+            case WeaponUse.Dig:
+                if (input.FirePressed) Excavate(weapon);
+                return;
+
+            // Балка ход не заканчивает — как верёвка: поставил мост и стреляй.
+            case WeaponUse.Build:
+                if (input.FirePressed) PlaceGirder(weapon);
+                return;
+
+            case WeaponUse.Chute:
+                if (input.FirePressed) OpenChute(weapon);
+                return;
+
+            case WeaponUse.Jet:
+                if (input.FirePressed) StartJet(weapon);
+                return;
         }
 
-        if (input.FirePressed) { _charging = true; _charge = 0f; }
+        // Набор силы начинает только нажатие, пришедшее на пустую полосу.
+        // Повторное нажатие посреди набора — палец перехватил прицел, кнопка
+        // «Огонь» прислала второе срабатывание — раньше обнуляло полосу: со
+        // стороны это выглядело как «сила пошла, сбросилась и пошла заново»,
+        // а выстрел в этот миг уходил с нулевой силой и падал под ноги.
+        if (input.FirePressed && !_charging) { _charging = true; _charge = 0f; }
 
         if (_charging)
         {
-            _charge = Mathf.Min(1f, _charge + Time.deltaTime / 1.15f);
+            _charge = Mathf.Min(1f, _charge + Time.deltaTime / ChargeTime);
             if (input.FireReleased || !input.FireHeld || _charge >= 1f)
             {
+                // Полоса едва тронулась — это не выстрел, а сорвавшийся палец.
+                // Прежде такой промах уходил снарядом под ноги и стоил хода.
+                if (_charge < MinCharge) { _charging = false; _charge = 0f; return; }
+
                 // Телепорт использует ту же полосу силы, только не как скорость снаряда,
                 // а как дальность прыжка — отдельного режима выбора точки не нужно.
                 if (weapon.Use == WeaponUse.Teleport) DoTeleport(weapon);
@@ -746,6 +825,182 @@ public class Worm : MonoBehaviour
         victim.Knockback(new Vector2(Facing * ProdPush, ProdLift));
         Sfx.Thud();
         return victim;
+    }
+
+    /// Раскрыт ли купол и включён ли ранец — для интерфейса и тестов.
+    public bool Chuting => _chute;
+    public bool Jetting => _jet;
+
+    /// Парашют раскрывается только в падении: на земле и на подъёме куполу
+    /// не за что зацепиться, а патрон тратился бы впустую. Ход не заканчивает.
+    public void OpenChute(Weapon w)
+    {
+        if (_chute) { CloseChute(); return; }
+        if (Grounded || _rb.linearVelocity.y > -1f)
+        {
+            Fx.FloatingText(transform.position + Vector3.up * 0.8f, "не в падении", new Color(1f, 0.85f, 0.4f));
+            return;
+        }
+
+        _acted = true;
+        _chute = true;
+        _fallPeak = float.NaN;
+        if (_canopy != null) _canopy.gameObject.SetActive(true);
+        Sfx.CrateDrop();
+        GameManager.I.ConsumeAmmo(w.Kind);
+    }
+
+    /// Под куполом червь падает медленно и его сносит ветром — тем же самым,
+    /// что уводит снаряды. Складывается купол сам: о землю, о воду и о верёвку.
+    void ChuteTick()
+    {
+        if (!_chute) return;
+
+        if (IsDead || Roped || transform.position.y < DestructibleTerrain.WaterLevel
+            || (Grounded && _rb.linearVelocity.y > -0.5f))
+        {
+            CloseChute();
+            return;
+        }
+
+        var v = _rb.linearVelocity;
+        v.y = Mathf.Max(v.y, -ChuteFall);
+        float wind = GameManager.I != null ? GameManager.I.Wind : 0f;
+        v.x = Mathf.MoveTowards(v.x, wind * ChuteDrift, 6f * Time.deltaTime);
+        _rb.linearVelocity = v;
+        _fallPeak = float.NaN;
+    }
+
+    public void CloseChute()
+    {
+        _chute = false;
+        if (_canopy != null) _canopy.gameObject.SetActive(false);
+    }
+
+    /// Ранец: топливо тратится, только пока держат кнопку, поэтому им можно
+    /// подпрыгнуть трижды по секунде, а не один раз на всё. Ход не заканчивает.
+    public void StartJet(Weapon w)
+    {
+        if (_jet) return;
+
+        _acted = true;
+        _jet = true;
+        _fuel = Mathf.Max(0.5f, w.Fuel);
+        Wake();
+        GameManager.I.ConsumeAmmo(w.Kind);
+        Fx.FloatingText(transform.position + Vector3.up * 0.8f, "ранец", w.Color);
+    }
+
+    void JetTick(IGameInput input, float move)
+    {
+        if (!_jet) return;
+
+        if (IsDead || Roped || transform.position.y < DestructibleTerrain.WaterLevel || _fuel <= 0f)
+        {
+            StopJet();
+            return;
+        }
+
+        bool thrust = input != null && input.FireHeld;
+        if (_flame != null) _flame.gameObject.SetActive(thrust);
+        if (!thrust) return;
+
+        _fuel -= Time.deltaTime;
+        var v = _rb.linearVelocity;
+        v.y = Mathf.Min(v.y + JetLift * Time.deltaTime, JetTop);
+        v.x = Mathf.MoveTowards(v.x, move * JetSide, 14f * Time.deltaTime);
+        _rb.linearVelocity = v;
+        _fallPeak = float.NaN;
+
+        if (_bubbleTimer <= 0f) Fx.Splash((Vector2)transform.position + Vector2.down * 0.6f,
+                                          new Color(1f, 0.75f, 0.35f), 2, 0.12f);
+    }
+
+    public void StopJet()
+    {
+        _jet = false;
+        _fuel = 0f;
+        if (_flame != null) _flame.gameObject.SetActive(false);
+    }
+
+    /// Бур и паяльная лампа. Разница между ними одна — куда режут: бур строго
+    /// вниз, лампа по прицелу. Рез идёт капсулой, а не чередой воронок: воронка
+    /// оставляет копоть, круглые лунки и пересобирает коллайдер на каждом шаге.
+    ///
+    /// Ход инструмент заканчивает. Без этого бур был бы бесплатным способом
+    /// уехать на другой конец карты: прокопался, вылез, выстрелил.
+    void Excavate(Weapon w)
+    {
+        _hasFiredThisTurn = true;
+
+        var terrain = GameManager.I.Terrain;
+        Vector2 origin = transform.position;
+        Vector2 dir = w.DigDown ? Vector2.down : AimDirection;
+        // Начинаем от края червя, иначе первый же пиксель реза — под ним самим.
+        Vector2 from = origin + dir * (_col.radius * 0.8f);
+        Vector2 to = from + dir * w.DigLength;
+
+        bool cut = terrain.Dig(from, to, w.DigRadius);
+
+        // Червя сдвигаем следом за резом: вниз он свалится сам, а по горизонтали
+        // остался бы стоять перед готовым тоннелем и лез бы в него ногами.
+        if (cut && !w.DigDown)
+        {
+            Vector2 step = from + dir * Mathf.Min(w.DigLength * 0.6f, 3.2f);
+            if (!terrain.IsSolidWorld(step)) PlaceAt(step);
+        }
+
+        Fx.Splash(from, w.Color, 10, 0.3f);
+        Sfx.Drill();
+        if (!cut) Fx.FloatingText(transform.position + Vector3.up * 0.8f, "не по чему копать", new Color(1f, 0.85f, 0.4f));
+
+        GameManager.I.ConsumeAmmo(w.Kind);
+        GameManager.I.OnWeaponFired();
+    }
+
+    /// Балка: мост под прицелом. Угол берётся из прицела и округляется до
+    /// сорока пяти градусов, как в оригинале, — иначе балка встаёт под случайным
+    /// наклоном и мостом уже не выглядит. Ставить внутрь червя нельзя: балка —
+    /// это порода, и червь оказался бы замурован.
+    void PlaceGirder(Weapon w)
+    {
+        _acted = true;
+
+        var terrain = GameManager.I.Terrain;
+        Vector2 center = (Vector2)transform.position + AimDirection * GirderReach;
+
+        // Угол прицела к ближайшим 45°, знак — по направлению взгляда.
+        float angle = Mathf.Round(AimAngle / 45f) * 45f * Facing;
+
+        var worms = GameManager.I.AllWorms();
+        for (int i = 0; i < worms.Count; i++)
+        {
+            var v = worms[i];
+            if (v == null || v.IsDead) continue;
+            // Прямоугольник балки грубо накрываем окружностью: точности хватает,
+            // а замуровать червя на полпикселя всё равно нельзя.
+            if (Vector2.Distance(v.transform.position, center) < GirderLength * 0.5f + 0.7f)
+            {
+                Fx.FloatingText(transform.position + Vector3.up * 0.8f, "мешает червь", new Color(1f, 0.85f, 0.4f));
+                return;
+            }
+        }
+
+        var metal = new Color32(150, 158, 170, 255);
+        if (!terrain.StampBeam(center, angle, GirderLength, GirderThickness, metal))
+        {
+            Fx.FloatingText(transform.position + Vector3.up * 0.8f, "некуда", new Color(1f, 0.85f, 0.4f));
+            return;
+        }
+
+        // Балка могла лечь под ногами у соседей — их надо расковать, иначе
+        // примороженный червь останется висеть, а не встанет на неё.
+        for (int i = 0; i < worms.Count; i++)
+            if (worms[i] != null) worms[i].Wake();
+
+        Fx.Splash(center, w.Color, 8, 0.25f);
+        Sfx.Thud();
+        GameManager.I.ConsumeAmmo(w.Kind);
     }
 
     /// Динамит, мина и овца кладутся под ноги. Мина остаётся на карте и после
