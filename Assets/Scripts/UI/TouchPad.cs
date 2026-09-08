@@ -240,10 +240,13 @@ public class TouchPad
     }
 
     /// Подпись на кнопке огня зависит от оружия: верёвку и телепорт не заряжают.
+    /// Пока ждут крестика — кнопка ставит метку, а не стреляет, и говорит об этом.
     void UpdateFire(GameManager gm)
     {
         var w = gm.CurrentWeapon;
-        string s = w.Kind == WeaponKind.Rope ? "ВЕРЁВКА"
+        bool marking = gm.ActiveWorm != null && gm.ActiveWorm.AwaitingTarget;
+        string s = marking ? "МЕТКА"
+                 : w.Kind == WeaponKind.Rope ? "ВЕРЁВКА"
                  : w.Kind == WeaponKind.Teleport ? "ПРЫЖОК"
                  : w.Hitscan ? "ОГОНЬ" : "ДЕРЖАТЬ";
         if (_fireLabel.text != s) _fireLabel.text = s;

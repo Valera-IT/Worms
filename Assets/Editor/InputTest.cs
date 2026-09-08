@@ -24,6 +24,8 @@ public static class InputTest
         public float AimAxis { get; set; }
         public bool HasAimTarget { get; set; }
         public Vector2 AimTarget { get; set; }
+        public bool HasMark { get; set; }
+        public Vector2 Mark { get; set; }
         public bool JumpPressed => false;
         public bool FirePressed => false;
         public bool FireHeld => false;

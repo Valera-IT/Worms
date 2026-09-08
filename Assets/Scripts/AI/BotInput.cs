@@ -61,6 +61,7 @@ public class BotInput : IGameInput
     int _fleeDir;         // куда бежим от своей воронки
     Vector2 _danger;      // где рванёт: от этой точки и убегаем
     bool _swung;          // верёвку за этот ход уже бросали
+    bool _blinded;        // выстрел наугад за этот ход уже делали
     BotPlanner.BotSwing _swing;   // за что цепляемся и куда качаемся
 
     // Выходные поля: заполняются раз в кадр в Tick.
@@ -114,6 +115,13 @@ public class BotInput : IGameInput
             return (Vector2)_worm.transform.position + dir * 4f;
         }
     }
+    /// Метка крестика: налёт и телепорт бот наводит ею, а не углом ствола.
+    /// Точку считает BotPlanner вместе с самим планом, поэтому отдельной фазы
+    /// «поставить крестик» у бота нет — червь ставит метку тем же кадром,
+    /// каким жмёт огонь.
+    public bool HasMark { get { Tick(); return _worm != null && _shot.Found && _shot.HasMark; } }
+    public Vector2 Mark { get { Tick(); return _shot.Mark; } }
+
     public bool JumpPressed { get { Tick(); return _jump; } }
     public bool FirePressed { get { Tick(); return _firePressed; } }
     public bool FireHeld { get { Tick(); return _fireHeld; } }
@@ -198,6 +206,7 @@ public class BotInput : IGameInput
         _crate = null;
         _fleeDir = 0;
         _swung = false;
+        _blinded = false;
         _swing = default;
         _shot = default;
         _aimAngle = worm.AimAngle;
@@ -228,6 +237,11 @@ public class BotInput : IGameInput
             return;
         }
 
+        // Ногами из воды не вышло — уходим телепортом. Сухая земля весит в
+        // оценке места больше всего остального, поэтому тонущему червю PlanJump
+        // почти всегда что-нибудь да находит.
+        if (_climbed && Drowning() && TryTeleport(gm)) return;
+
         // Ящик с припасами. Подбор ходом не считается: сходить и выстрелить
         // можно за один ход, поэтому вопрос не «вместо чего», а «успеем ли» —
         // время на дорогу и на выстрел после неё считает BotPlanner.BestCrate.
@@ -238,14 +252,20 @@ public class BotInput : IGameInput
 
         // Время выходит: берём что угодно, лишь бы не по своим.
         if (timePressed && _shot.Found && _shot.Score > -5f) { GoAim(); return; }
+        if (timePressed && !_shot.Found && TryBlind(gm)) return;
 
         // Попадания нет, но воронка ложится у врага — со второй попытки этого
         // достаточно: подрытое укрытие уже работа, а ход не резиновый.
         if (_attempts >= 2 && _shot.Found && _shot.Score > 0.2f) { GoAim(); return; }
 
+        // Есть ли вообще куда шагнуть. На островке шириной в три прыжка идти
+        // некуда: по обе стороны вода, и «подойти поближе» превращается в
+        // хождение по кругу «думаю — упёрся — думаю».
+        bool canWalk = SafeStep(1f) || SafeStep(-1f);
+
         // Совсем ничего. Подходим и считаем заново — с новой точки открывается
         // и угол, и дистанция.
-        if (_attempts <= 3 && !timePressed) { _phase = Phase.Approach; _t = 0f; return; }
+        if (_attempts <= 3 && !timePressed && canWalk) { _phase = Phase.Approach; _t = 0f; return; }
 
         // Подойти не вышло: враг за гребнем, этажом ниже или на соседнем
         // острове. Сперва верёвка — её на матч три, и ход после неё продолжается;
@@ -255,11 +275,34 @@ public class BotInput : IGameInput
 
         if (_shot.Found && _shot.Score > -1f) { GoAim(); return; }
 
-        // Совсем ничего. Идти дальше всё равно лучше, чем стоять столбом:
-        // раньше ход в этом месте просто сгорал.
+        // Ни выстрела, ни дороги, ни верёвки. Бьём наугад в сторону врага:
+        // мимо так мимо, зато ход сделан. Раньше бот в этом месте уходил в
+        // Approach, тот сразу упирался в воду и возвращал его сюда — так весь
+        // ход и сгорал, а червь на соседнем острове стоял не шелохнувшись.
+        if (TryBlind(gm)) return;
+
+        // Идти дальше всё равно лучше, чем стоять столбом.
         _shot = default;
         _phase = Phase.Approach;
         _t = 0f;
+    }
+
+    /// Выстрел вслепую в ближайшего врага — раз за ход. Считает его BotPlanner:
+    /// там же, где и остальная баллистика.
+    bool TryBlind(GameManager gm)
+    {
+        if (_blinded) return false;
+
+        var enemy = NearestEnemy(gm);
+        if (enemy == null) return false;
+
+        var shot = BotPlanner.Blind(_worm, enemy.transform.position);
+        if (!shot.Found) return false;
+
+        _blinded = true;
+        _shot = shot;
+        GoAim();
+        return true;
     }
 
     void GoAim()
@@ -269,32 +312,39 @@ public class BotInput : IGameInput
         _t = 0f;
     }
 
-    /// Врага не достать ни выстрелом, ни ногами. Телепорт переносит на семь
-    /// юнитов не долетая до него: оттуда и цель видно, и своей же воронкой
-    /// не накроет.
+    /// Насколько место должно стать лучше, чтобы прыжок себя оправдал.
+    /// Телепорт стоит целого хода и одного из двух патронов на матч, поэтому
+    /// переставлять червя на соседний бугор незачем. Тонущему червю столько
+    /// набегает от одной только сухой земли.
+    const float JumpGain = 14f;
+
+    /// Врага не достать ни выстрелом, ни ногами — или вода уже по пояс.
+    /// Точку выбирает BotPlanner.PlanJump: он смотрит на всю карту, как игрок
+    /// крестиком, и берёт место, где стоять заметно лучше, чем сейчас.
     bool TryTeleport(GameManager gm)
     {
         if (_teleported || !_skills.Teleport) return false;
         int idx = Weapon.IndexOf(WeaponKind.Teleport);
         if (!gm.HasAmmo(idx)) return false;
 
-        var enemy = NearestEnemy(gm);
-        if (enemy == null) return false;
+        if (!BotPlanner.PlanJump(_worm, out Vector2 point, out float gain)) return false;
+        if (gain < JumpGain) return false;
 
-        Vector2 d = (Vector2)enemy.transform.position - (Vector2)_worm.transform.position;
-        float dist = d.magnitude;
-        if (dist < Teleport.MinRange + 2f) return false;
-
-        float range = Mathf.Clamp(dist - 7f, Teleport.MinRange, Teleport.MaxRange);
+        Vector2 d = point - (Vector2)_worm.transform.position;
         _teleported = true;
         _posBeforeJump = _worm.transform.position;
         _shot = new BotShot
         {
             Found = true,
             Weapon = idx,
+            // Угол и сторона нужны только на вид: червь разворачивается туда,
+            // куда сейчас исчезнет. Переносит его сама метка.
             Angle = Mathf.Clamp(Mathf.Atan2(d.y, Mathf.Abs(d.x)) * Mathf.Rad2Deg, -85f, 85f),
             Facing = d.x >= 0f ? 1 : -1,
-            Charge = Mathf.InverseLerp(Teleport.MinRange, Teleport.MaxRange, range)
+            Charge = 1f,
+            HasMark = true,
+            Mark = point,
+            Impact = point
         };
         GoAim();
         return true;
@@ -612,10 +662,14 @@ public class BotInput : IGameInput
 
         var hs = Weapon.All[_shot.Weapon];
 
-        // Удар вплотную, налёт и закладка набора силы не требуют: одно нажатие —
-        // и ход окончен. Закладка при этом кладётся под ноги, поэтому убегать
-        // придётся от себя самого — точку взрыва запоминаем здесь.
-        if (hs.Use == WeaponUse.Melee || hs.Use == WeaponUse.Strike || hs.Use == WeaponUse.Drop)
+        // Удар вплотную, налёт, закладка и телепорт набора силы не требуют:
+        // одно нажатие — и ход окончен. У налёта и телепорта всё наведение —
+        // это метка, а полосу силы червь всё равно отпустит следующим кадром,
+        // как только бот перестанет держать огонь. Закладка при этом кладётся
+        // под ноги, поэтому убегать придётся от себя самого — точку взрыва
+        // запоминаем здесь.
+        if (hs.Use == WeaponUse.Melee || hs.Use == WeaponUse.Strike
+         || hs.Use == WeaponUse.Drop  || hs.Use == WeaponUse.Teleport)
         {
             _firePressed = _fireHeld = true;
             MarkDanger();

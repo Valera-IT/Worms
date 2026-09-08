@@ -312,7 +312,10 @@ public static class BotTest
 
         // --- фаза 12, остальное: ракета, верёвка, память и умения ---
         CheckHoming(gm, terrain, shooter, victim, low);
+        CheckStrike(gm, shooter, victim, low);
+        CheckJump(gm, shooter, victim, low);
         CheckSwing(gm, shooter);
+        CheckBlind(gm, shooter, victim);
         CheckMemory(gm, shooter, victim);
         CheckSkills(shooter);
 
@@ -415,6 +418,63 @@ public static class BotTest
     /// брать ракету в руки боту нельзя. Обоих червей поднимаем высоко в небо —
     /// там заведомо нет ни склона, ни кроны, и проверяется ровно доворот, а не
     /// удача с рельефом.
+    /// Налёт наводится меткой, а не лучом прицела: бомбы должны сыпаться на
+    /// врага и тогда, когда до него не докинуть по прямой. Раньше точку искал
+    /// луч, и из-за гребня налёт ложился на гребень.
+    static void CheckStrike(GameManager gm, Worm shooter, Worm victim, Vector2 low)
+    {
+        victim.PlaceAt(low);
+        shooter.PlaceAt(low + new Vector2(26f, 0f));
+
+        int idx = Weapon.IndexOf(WeaponKind.AirStrike);
+        var strike = BotPlanner.TryStrike(shooter, idx);
+
+        // Целью мог оказаться другой червь чужой команды — меряем до ближайшего.
+        float miss = 999f;
+        if (strike.Found)
+            foreach (var o in gm.AllWorms())
+                if (o != null && !o.IsDead && o.Team != shooter.Team)
+                    miss = Mathf.Min(miss, Mathf.Abs(strike.Mark.x - o.transform.position.x));
+
+        Debug.Log($"BOT step3m: налёт — {(strike.Found ? "есть" : "нет")}, " +
+                  $"метка {(strike.HasMark ? $"{strike.Mark.x:0.0};{strike.Mark.y:0.0}" : "нет")}, " +
+                  $"оценка {strike.Score:0.0}, метка в {miss:0.0} юнита от врага по горизонтали");
+
+        if (!strike.Found) Fail("бот не рассматривает налёт вовсе");
+        else if (!strike.HasMark) Fail("налёт бота идёт без метки — точку задаёт крестик");
+        else if (miss > 5f) Fail($"метка налёта легла в {miss:0.0} юнита от врага");
+        else if (strike.Score <= 0f) Fail($"налёт бот считает бесполезным, оценка {strike.Score:0.0}");
+    }
+
+    /// Телепорт наводится меткой на всю карту. Тонущему червю прыжок обязан
+    /// найтись: сухая земля весит в оценке места больше всего остального.
+    static void CheckJump(GameManager gm, Worm shooter, Worm victim, Vector2 low)
+    {
+        victim.PlaceAt(low);
+        shooter.PlaceAt(new Vector2(Mathf.Clamp(low.x + 30f, 2f, DestructibleTerrain.WorldWidth - 2f),
+                                    DestructibleTerrain.WaterLevel + 1f));
+
+        bool found = BotPlanner.PlanJump(shooter, out Vector2 point, out float gain);
+        float dry = point.y - DestructibleTerrain.WaterLevel;
+        float toEnemy = 999f;
+        foreach (var o in gm.AllWorms())
+            if (o != null && !o.IsDead && o.Team != shooter.Team)
+                toEnemy = Mathf.Min(toEnemy, Vector2.Distance(point, o.transform.position));
+
+        Debug.Log($"BOT step3n: телепорт тонущего — {(found ? $"{point.x:0.0};{point.y:0.0}" : "некуда")}, " +
+                  $"прибавка {gain:0.0}, над водой {dry:0.0}, до врага {toEnemy:0.0}");
+
+        if (!found) Fail("тонущему червю бот не нашёл куда прыгнуть");
+        else
+        {
+            if (gain <= 0f) Fail($"бот считает прыжок из воды бесполезным, прибавка {gain:0.0}");
+            if (dry < 2f) Fail($"бот прыгает обратно в воду: над водой {dry:0.0} юнита");
+            if (toEnemy < 4f) Fail($"бот прыгает врагу под ноги: до него {toEnemy:0.0} юнита");
+            if (!Teleport.JumpTo(shooter, point))
+                Fail("отмеченная точка не годится для прыжка — сам телепорт её не берёт");
+        }
+    }
+
     static void CheckHoming(GameManager gm, DestructibleTerrain terrain,
                             Worm shooter, Worm victim, Vector2 low)
     {
@@ -463,6 +523,61 @@ public static class BotTest
         if (!Weapon.All[idx].BotCanUse) Fail("ракета всё ещё вне арсенала бота");
         if (!shot.Found) Fail("модель не доводит ракету никуда — доворот не работает");
         else if (miss > 5f) Fail($"ракета уходит в {miss:0.0} юнита мимо цели");
+
+        // Тот же выстрел, но посчитанный перебором целиком: цель ракете задаёт
+        // метка, а не ствол, поэтому перебор обязан вернуть точку на враге и
+        // траекторию, которая в эту точку приходит. Раньше цель выбирал
+        // HomeTargetFor, и в куче червей посчитан был один выстрел, а летел
+        // другой.
+        var planned = BotPlanner.TryHoming(shooter, idx);
+
+        // Метку бот вправе поставить на любого врага — меряем до ближайшего.
+        float markMiss = 999f;
+        if (planned.HasMark)
+            foreach (var o in gm.AllWorms())
+                if (o != null && !o.IsDead && o.Team != shooter.Team)
+                    markMiss = Mathf.Min(markMiss, Vector2.Distance(planned.Mark, o.transform.position));
+        float drift = planned.Found ? Vector2.Distance(planned.Impact, planned.Mark) : 999f;
+
+        Debug.Log($"BOT step3o: ракета по метке — {(planned.Found ? "есть" : "нет")}, " +
+                  $"метка {(planned.HasMark ? $"{planned.Mark.x:0.0};{planned.Mark.y:0.0}" : "нет")} " +
+                  $"в {markMiss:0.0} юнита от врага, воронка в {drift:0.0} от метки, " +
+                  $"угол {planned.Angle:0.0}°, сила {planned.Charge:0.00}, оценка {planned.Score:0.0}");
+
+        if (!planned.Found) Fail("перебор не нашёл ракете ни одной траектории");
+        else if (!planned.HasMark) Fail("ракета бота идёт без метки — цель задаёт крестик");
+        else if (markMiss > 2.5f) Fail($"метка ракеты легла в {markMiss:0.0} юнита от врага");
+        else if (drift > 4f) Fail($"ракета приходит в {drift:0.0} юнита от собственной метки");
+        else if (planned.Score <= 0f) Fail($"свой же выстрел ракетой бот считает пустым, оценка {planned.Score:0.0}");
+    }
+
+    /// Выстрел наугад. Он нужен там, где перебор не нашёл ничего, а ногами до
+    /// врага не дойти: без него бот на своём островке простаивал весь ход,
+    /// перебирая «подумать — упереться в воду — подумать». Проверяем, что
+    /// выстрел вообще находится, смотрит в сторону врага и не летит отвесно
+    /// вверх, — а на чистом небе ещё и что баллистика доносит его до цели.
+    static void CheckBlind(GameManager gm, Worm shooter, Worm victim)
+    {
+        var blind = BotPlanner.Blind(shooter, victim.transform.position);
+        float dx = victim.transform.position.x - shooter.transform.position.x;
+        int want = dx >= 0f ? 1 : -1;
+
+        Debug.Log($"BOT step3l: выстрел наугад — {(blind.Found ? Weapon.All[blind.Weapon].Name : "нет")}, " +
+                  $"угол {blind.Angle:0.0}°, сила {blind.Charge:0.00}, сторона {blind.Facing} (враг в {dx:0.0})");
+
+        if (!blind.Found) { Fail("выстрела наугад нет вовсе — боту опять нечем занять ход"); return; }
+        if (blind.Facing != want) Fail("выстрел наугад смотрит не в ту сторону");
+        if (blind.Charge < 0.5f) Fail($"выстрел наугад идёт вполсилы: {blind.Charge:0.00}");
+        if (Mathf.Abs(blind.Angle) > 85f) Fail($"угол выстрела наугад за пределами прицела: {blind.Angle:0.0}");
+
+        // Ту же пару «угол и сила» прогоняем настоящей моделью полёта: если
+        // между червями чисто, наугад — это попадание, а не жест отчаяния.
+        var flown = BotPlanner.Try(shooter, blind.Weapon, blind.Angle, blind.Facing, blind.Charge);
+        if (flown.Found)
+        {
+            float miss = Vector2.Distance(flown.Impact, victim.transform.position);
+            Debug.Log($"BOT step3l: наугад лёг в {miss:0.0} юнита от врага");
+        }
     }
 
     /// Верёвка: качели считаются не всегда — над червём должно быть за что

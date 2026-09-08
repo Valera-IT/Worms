@@ -11,6 +11,11 @@ public struct BotShot
     public float Charge;    // доля набора силы, 0.18..1
     public float Score;     // ожидаемая польза: урон врагу минус свои потери
     public Vector2 Impact;  // где рванёт по расчёту — для отладки и тестов
+
+    /// Точка для крестика: налёт и телепорт наводятся ею, а не углом ствола
+    /// (Weapon.Targeted). BotInput отдаёт её червю через IGameInput.Mark.
+    public bool HasMark;
+    public Vector2 Mark;
 }
 
 /// Как бот выбирает выстрел: перебор пар «угол и сила» с аналитической
@@ -42,10 +47,17 @@ public static class BotPlanner
     /// Правильная оценка — классический минимум для попадания в точку (dx, dy):
     /// v² = g·(dy + √(dx² + dy²)). Для цели ниже dy отрицательный, и порог сам
     /// опускается; для цели выше — растёт.
+    /// Заодно и самый дальний: заряд, которым перебрасывает и через него,
+    /// перебирать незачем. Раньше верхней границы не было вовсе — при прежних
+    /// скоростях её роль играл сам предел броска, а после того как бросок
+    /// удвоили, половина сетки зарядов стала уходить за край карты.
+    static float MaxSpeedUseful;
+
     static float MinSpeedNeeded(Worm shooter, int facing)
     {
         float g = Mathf.Abs(Physics2D.gravity.y);
         float best = -1f;
+        float far = 0f;
         Vector2 from = shooter.transform.position;
 
         for (int i = 0; i < _worms.Count; i++)
@@ -60,7 +72,12 @@ public static class BotPlanner
             float r = Mathf.Sqrt(dx * dx + dy * dy);
             float v = Mathf.Sqrt(Mathf.Max(0.01f, g * (dy + r)));
             if (best < 0f || v < best) best = v;
+            if (v > far) far = v;
         }
+
+        // Полторы минимальные скорости — это и навесная траектория над гребнем,
+        // и перелёт с запасом; всё, что выше, летит в соседнее море.
+        MaxSpeedUseful = far * 1.7f;
         return best;
     }
 
@@ -86,6 +103,10 @@ public static class BotPlanner
 
     static void Snapshot()
     {
+        // Метка живёт ровно один перебор: чужой расчёт не должен получить
+        // ракету, привязанную к чьей-то прошлой цели.
+        _homeForced = false;
+
         _worms.Clear();
         var all = GameManager.I.AllWorms();
         for (int i = 0; i < all.Count; i++)
@@ -123,6 +144,7 @@ public static class BotPlanner
         if (gm == null || shooter == null || shooter.IsDead) return default;
 
         Snapshot();
+        _strikeFall.Clear();
         _skills = skills;
         _shooter = shooter;
         // Грубый шаг по углу можно держать крупным: точность добирает второй
@@ -154,6 +176,10 @@ public static class BotPlanner
             // сыплется с неба мимо всякого рельефа, а удар вплотную вообще не
             // летит. Раньше бот знал только первые два и в упор или из-за
             // гребня оставался без единого варианта.
+            // Ракета целится меткой, а не стволом, поэтому и перебор у неё
+            // свой: он идёт от точки на карте, а не от угла ствола.
+            if (w.Homing) { Consider(ref best, Homing(shooter, wi)); continue; }
+
             switch (w.Use)
             {
                 case WeaponUse.Hitscan: Consider(ref best, Hitscan(shooter, wi)); continue;
@@ -172,10 +198,12 @@ public static class BotPlanner
                 // с горы, но подрыв укрытия рядом и скачущая граната ещё в игре.
                 float floorSpeed = need * 0.8f;
 
+                float ceilSpeed = MaxSpeedUseful;
+
                 for (float c = 0.2f; c <= 1.0001f; c += chargeStep)
                 {
                     float speed = w.LaunchSpeed * Mathf.Min(c, 1f);
-                    if (speed < floorSpeed) continue;
+                    if (speed < floorSpeed || speed > ceilSpeed) continue;
 
                     for (float a = -85f; a <= 85f; a += angleStep)
                         Consider(ref best, TryCore(shooter, wi, a, facing, Mathf.Min(c, 1f), Coarse, false));
@@ -194,6 +222,12 @@ public static class BotPlanner
             int an = Mathf.CeilToInt(angleStep / da);
             var tuned = new BotShot { Score = float.NegativeInfinity };
 
+            // Ракету точный проход обязан вести в ту же метку, что и грубый:
+            // без этого она на последнем шаге переучивалась на ближайшего врага
+            // и уточнялась совсем другая траектория.
+            _homeForced = seed.HasMark;
+            _homeMark = seed.Mark;
+
             for (int i = -an; i <= an; i++)
                 for (int j = -2; j <= 2; j++)
                 {
@@ -201,13 +235,70 @@ public static class BotPlanner
                     Consider(ref tuned, TryCore(shooter, seed.Weapon, seed.Angle + i * da,
                                                seed.Facing, c, Fine, true));
                 }
-            if (tuned.Found) best = tuned;
+            if (tuned.Found)
+            {
+                tuned.HasMark = seed.HasMark;
+                tuned.Mark = seed.Mark;
+                best = tuned;
+            }
+            _homeForced = false;
         }
 
         // Дрожание рук — последняя из разниц между сложностями, а не главная.
         best.Angle = Mathf.Clamp(best.Angle + Gauss(rng) * skills.AngleJitter, -85f, 85f);
         best.Charge = Mathf.Clamp(best.Charge + Gauss(rng) * skills.ChargeJitter, 0.18f, 1f);
         return best;
+    }
+
+    /// Выстрел наугад: последнее средство, когда перебор не нашёл ни одной
+    /// траектории, а ногами до врага не дойти. Угол берётся из школьной
+    /// баллистики (без ветра и без проверки препятствий), сила — полная.
+    ///
+    /// Нужен затем, что раньше в этом месте бот уходил «подойти поближе»,
+    /// упирался в воду у кромки острова, возвращался думать — и так до конца
+    /// хода: со стороны червь просто стоял столбом весь ход. Промах в море
+    /// стоит меньше, чем сгоревший ход, а из двух решений баллистики берётся
+    /// настильное — оно короче по времени и меньше зависит от ветра.
+    public static BotShot Blind(Worm shooter, Vector2 target)
+    {
+        var gm = GameManager.I;
+        if (gm == null || shooter == null) return default;
+
+        int idx = -1;
+        for (int i = 0; i < Weapon.All.Length && idx < 0; i++)
+        {
+            var w = Weapon.All[i];
+            // Бесконечное и по баллистике: тратить последнюю ракету на выстрел
+            // вслепую незачем.
+            if (w.Use == WeaponUse.Charged && w.Ammo < 0 && !w.Homing && gm.HasAmmo(i)) idx = i;
+        }
+        for (int i = 0; i < Weapon.All.Length && idx < 0; i++)
+        {
+            var w = Weapon.All[i];
+            if (w.Use == WeaponUse.Charged && w.BotCanUse && gm.HasAmmo(i)) idx = i;
+        }
+        if (idx < 0) return default;
+
+        var gun = Weapon.All[idx];
+        Vector2 from = shooter.transform.position;
+        float dx = target.x - from.x, dy = target.y - from.y;
+        int facing = dx >= 0f ? 1 : -1;
+        float x = Mathf.Abs(dx);
+        float g = Mathf.Abs(Physics2D.gravity.y);
+        float v = gun.LaunchSpeed;
+
+        // v⁴ − g(g·x² + 2·dy·v²): меньше нуля — до цели не добросить ни под
+        // каким углом, тогда бьём под сорок пять, дальше всего.
+        float angle = 45f;
+        float disc = v * v * v * v - g * (g * x * x + 2f * dy * v * v);
+        if (x > 0.5f && disc >= 0f)
+            angle = Mathf.Atan((v * v - Mathf.Sqrt(disc)) / (g * x)) * Mathf.Rad2Deg;
+
+        return new BotShot
+        {
+            Found = true, Weapon = idx, Charge = 1f, Facing = facing,
+            Angle = Mathf.Clamp(angle, -85f, 85f), Impact = target, Score = 0f
+        };
     }
 
     /// Чем платим за выстрел. Базука и граната бесконечны — их не жалко;
@@ -255,6 +346,24 @@ public static class BotPlanner
         return Drop(shooter, weaponIndex);
     }
 
+    /// Один расчёт ракеты. Точка входа для тестов — как TryDrop для закладки.
+    public static BotShot TryHoming(Worm shooter, int weaponIndex)
+    {
+        Snapshot();
+        _skills = BotSkills.For(BotDifficulty.Hard);
+        _shooter = shooter;
+        return Homing(shooter, weaponIndex);
+    }
+
+    /// Один расчёт налёта. Точка входа для тестов — как TryDrop для закладки.
+    public static BotShot TryStrike(Worm shooter, int weaponIndex)
+    {
+        Snapshot();
+        _skills = BotSkills.For(BotDifficulty.Hard);
+        _shooter = shooter;
+        return Strike(shooter, weaponIndex);
+    }
+
     static BotShot TryCore(Worm shooter, int weaponIndex, float angleDeg, int facing, float charge,
                            float dt, bool fine)
     {
@@ -266,9 +375,11 @@ public static class BotPlanner
         Vector2 p = (Vector2)shooter.transform.position + dir * 0.95f;
         Vector2 v = dir * (w.LaunchSpeed * Mathf.Max(0.18f, charge));
 
-        // Ракета выбирает цель один раз, в миг выстрела, и по стороне прицела —
-        // ровно как Worm.HomingTarget. Модель обязана выбрать ту же.
-        if (w.Homing) _homeTarget = HomeTargetFor(shooter, dir);
+        // Куда доворачивать. Бот метит цель крестиком, и тогда точка задана
+        // снаружи — ровно та, которую червь поставит меткой. Метки нет
+        // (выстрел наугад, сверка из теста) — ракета выберет цель сама, по
+        // стороне прицела, ровно как Worm.HomingTarget.
+        if (w.Homing) _homeTarget = _homeForced ? _homeMark : HomeTargetFor(shooter, dir);
 
         if (!Fly(w, shooter, ref p, ref v, dt, fine)) return default;
 
@@ -281,9 +392,15 @@ public static class BotPlanner
 
     const float HomingDelay = 0.35f;   // Projectile.HomingDelay: столько ракета летит прямо
     const float HomingTurn = 260f;     // Projectile.HomingTurn: градусов в секунду
+    const float HomingFuel = 3.4f;     // Projectile.HomingFuel: столько работает двигатель
 
     /// Куда доворачивает ракета в считаемой сейчас траектории.
     static Vector2 _homeTarget;
+
+    /// Метка, поставленная перебором: пока она задана, ракета в модели идёт
+    /// именно в неё, а не в того, кого выбрал бы ствол.
+    static bool _homeForced;
+    static Vector2 _homeMark;
 
     /// Кого выберет ракета, пущенная в эту сторону. Точка входа для тестов:
     /// сама снимает список червей, как Try и TryDrop.
@@ -337,7 +454,7 @@ public static class BotPlanner
     static bool Fly(Weapon w, Worm shooter, ref Vector2 p, ref Vector2 v, float dt, bool fine)
     {
         var terrain = GameManager.I.Terrain;
-        var a = Accel(w);
+        Vector2 a = Accel(w);
         float fuse = w.Fuse > 0f ? w.Fuse : float.MaxValue;
         float t = 0f;
 
@@ -355,7 +472,12 @@ public static class BotPlanner
         {
             // Доворот ракеты — до интегрирования, как и в FixedUpdate снаряда:
             // Home() переписывает скорость, и уже её физика превращает в путь.
-            if (w.Homing && t >= HomingDelay)
+            // Кончилось топливо — ракета перестаёт доворачивать и вновь весит
+            // полную гравитацию, как в Projectile.Thrust.
+            if (w.Homing && t >= HomingDelay + HomingFuel)
+                a = new Vector2(a.x, Physics2D.gravity.y);
+
+            if (w.Homing && t >= HomingDelay && t < HomingDelay + HomingFuel)
             {
                 Vector2 want = _homeTarget - p;
                 // Ракета рвётся, дойдя до самой точки цели, а не только от касания.
@@ -378,38 +500,61 @@ public static class BotPlanner
 
             if (t + dt >= fuse) { p = next; return true; }
 
-            // Снаряд рвётся коллайдером, а не центром: точный проход щупает
-            // на радиус вперёд по курсу.
-            Vector2 probe = fine ? next + v.normalized * ProjRadius : next;
+            // Шаг летит длинным: при полном заряде базука проходит за кадр
+            // физики больше юнита, и проверка одного лишь конца шага
+            // прошивала насквозь и гребень, и червя. Идём по отрезку
+            // выборками не реже чем через треть юнита — тем же способом,
+            // каким физика Unity ведёт непрерывную проверку (Continuous).
+            Vector2 seg = next - p;
+            float spacing = fine ? 0.3f : 0.7f;
+            int samples = Mathf.Clamp(Mathf.CeilToInt(seg.magnitude / spacing), 1, 32);
+            Vector2 dirN = v.sqrMagnitude > 1e-6f ? v.normalized : Vector2.zero;
 
-            // Прямое попадание в червя: рвётся всё, кроме прыгучего — граната
-            // от червя просто отскакивает, как и в Projectile.OnCollisionEnter2D.
-            bool hitWorm = false;
-            if (!w.Bouncy)
-                for (int i = 0; i < _worms.Count; i++)
+            bool hitWorm = false, hitGround = false;
+            Vector2 at = next;
+
+            for (int sIdx = 1; sIdx <= samples && !hitWorm && !hitGround; sIdx++)
+            {
+                Vector2 q = p + seg * (sIdx / (float)samples);
+
+                // Снаряд рвётся коллайдером, а не центром: точный проход щупает
+                // на радиус вперёд по курсу.
+                Vector2 probe = fine ? q + dirN * ProjRadius : q;
+
+                // Прямое попадание в червя: рвётся всё, кроме прыгучего — граната
+                // от червя просто отскакивает, как и в Projectile.OnCollisionEnter2D.
+                if (!w.Bouncy)
                 {
-                    var o = _worms[i];
-                    if (o == null || o.IsDead || o == shooter) continue;
-                    if (((Vector2)o.transform.position - probe).sqrMagnitude < HitRadius * HitRadius)
-                    { hitWorm = true; break; }
+                    for (int i = 0; i < _worms.Count; i++)
+                    {
+                        var o = _worms[i];
+                        if (o == null || o.IsDead || o == shooter) continue;
+                        if (((Vector2)o.transform.position - probe).sqrMagnitude < HitRadius * HitRadius)
+                        { hitWorm = true; break; }
+                    }
+
+                    if (!hitWorm)
+                        for (int i = 0; i < _crates.Count; i++)
+                        {
+                            var cr = _crates[i];
+                            if (cr == null) continue;
+                            if (((Vector2)cr.transform.position - probe).sqrMagnitude < CrateRadius * CrateRadius)
+                            { hitWorm = true; break; }
+                        }
                 }
 
-            if (!hitWorm && !w.Bouncy)
-                for (int i = 0; i < _crates.Count; i++)
-                {
-                    var cr = _crates[i];
-                    if (cr == null) continue;
-                    if (((Vector2)cr.transform.position - probe).sqrMagnitude < CrateRadius * CrateRadius)
-                    { hitWorm = true; break; }
-                }
+                // Круг, а не точка: снаряд с радиусом задевает крону дерева или
+                // гребень, сквозь которые точечная выборка проскакивала — и расчёт
+                // расходился с физикой на десяток юнитов.
+                if (!hitWorm)
+                    hitGround = fine ? SolidAround(terrain, probe, ProjRadius) : terrain.IsSolidWorld(probe);
 
-            // Круг, а не точка: снаряд с радиусом задевает крону дерева или
-            // гребень, сквозь которые точечная выборка проскакивала — и расчёт
-            // расходился с физикой на десяток юнитов.
-            bool hitGround = fine ? SolidAround(terrain, probe, ProjRadius) : terrain.IsSolidWorld(probe);
+                if (hitWorm || hitGround) at = q;
+            }
 
             if (hitWorm || hitGround)
             {
+                next = at;
                 // Шаг крупный — половиним его и подходим к точке касания ближе.
                 if (dt > touch) { dt *= 0.5f; continue; }
 
@@ -493,18 +638,91 @@ public static class BotPlanner
         return best;
     }
 
+    /// Самонаводящаяся ракета. Целится она меткой на карте, а не стволом,
+    /// поэтому и перебор идёт от метки: берём ближайших врагов, ставим крестик
+    /// в корпус и чуть выше головы — из-под свода и с обратного склона ракета
+    /// заходит сверху, — и для каждой метки ищем пару «угол и сила», с которой
+    /// она доходит. Ствол при этом почти свободен: доворот вытянет ракету на
+    /// метку с любого разумного угла, и перебор нужен затем, чтобы найти тот,
+    /// с которого она не воткнётся в породу на первых метрах.
+    ///
+    /// Раньше ракета шла общим перебором, а цель ей выбирал HomeTargetFor —
+    /// ближайший враг в сторону ствола. Отсюда и брались её главные глупости:
+    /// пущенная в кучу, она сворачивала к тому, кто ближе, а не к тому, по кому
+    /// считался выстрел.
+    static BotShot Homing(Worm shooter, int weaponIndex)
+    {
+        var w = Weapon.All[weaponIndex];
+        var best = new BotShot { Score = float.NegativeInfinity };
+        Vector2 from = shooter.transform.position;
+
+        _targets.Clear();
+        for (int i = 0; i < _worms.Count; i++)
+        {
+            var o = _worms[i];
+            if (o == null || o.IsDead || o.Team == shooter.Team) continue;
+            _targets.Add(o);
+        }
+        _targets.Sort((x, y) =>
+            Vector2.SqrMagnitude((Vector2)x.transform.position - from)
+            .CompareTo(Vector2.SqrMagnitude((Vector2)y.transform.position - from)));
+
+        for (int i = 0; i < _targets.Count && i < 3; i++)
+        {
+            Vector2 t = _targets[i].transform.position;
+            foreach (float lift in _homingLifts)
+            {
+                Vector2 mark = t + Vector2.up * lift;
+
+                // Червь разворачивается к метке, как и у игрока: крестик сам
+                // поворачивает червя (Worm.MarkInput), а стрелять ракетой в
+                // противоположную сторону смысла нет — доворот съест топливо
+                // на разворот и до цели уже не дотянет.
+                int facing = mark.x >= from.x ? 1 : -1;
+
+                _homeForced = true;
+                _homeMark = mark;
+
+                // Силу перебираем от трети: слабее ракета не успевает уйти
+                // от собственных ног, а доворот всё равно уравнивает разницу.
+                for (float c = 0.3f; c <= 1.0001f; c += _skills.ChargeStep)
+                    for (float a = -85f; a <= 85f; a += _skills.AngleStep)
+                    {
+                        var cand = TryCore(shooter, weaponIndex, a, facing,
+                                           Mathf.Min(c, 1f), Coarse, false);
+                        if (!cand.Found) continue;
+                        cand.HasMark = true;
+                        cand.Mark = mark;
+                        Consider(ref best, cand);
+                    }
+            }
+        }
+
+        _homeForced = false;
+        return best;
+    }
+
+    /// Насколько выше червя ставится метка. Ноль — прямо в корпус; полтора
+    /// юнита — над головой, откуда ракета сваливается сверху и не цепляет
+    /// козырёк, под которым враг сидит.
+    static readonly float[] _homingLifts = { 0f, 1.5f };
+
     /// Налёт: бомбы падают с неба, поэтому он достаёт туда, куда снаряд не
     /// летит, — за гребень, на дно каньона, на соседний остров. Точку задаёт
-    /// луч прицела, ровно как в Worm.CallAirStrike, поэтому целимся прямо во
-    /// врага и считаем ту самую пятёрку бомб, которая посыплется.
+    /// крестик (Worm.CallAirStrike берёт её из метки), а значит перебирать
+    /// углы больше незачем: пробуем сами точки вокруг ближайших врагов и
+    /// считаем ту самую пятёрку бомб, которая на них посыплется.
+    ///
+    /// Раньше точка искалась лучом прицела, и налёт наследовал все его беды:
+    /// за гребнем бомбы ложились на гребень, а из ямы — в двух шагах от ног.
     static BotShot Strike(Worm shooter, int weaponIndex)
     {
         var w = Weapon.All[weaponIndex];
         var best = new BotShot { Score = float.NegativeInfinity };
 
-        // Только ближайшая тройка: пятёрка бомб на каждый угол — это уже
-        // полторы сотни полётов, а по дальнему краю карты налёт всё равно
-        // не лучший выбор.
+        // Только ближайшая тройка: пятёрка бомб на каждую точку — это уже
+        // сотня полётов, а по дальнему краю карты налёт всё равно не лучший
+        // выбор.
         _targets.Clear();
         for (int i = 0; i < _worms.Count; i++)
         {
@@ -518,24 +736,32 @@ public static class BotPlanner
 
         for (int i = 0; i < _targets.Count && i < 3; i++)
         {
-            var target = _targets[i];
-            Vector2 d = (Vector2)target.transform.position - (Vector2)shooter.transform.position;
-            if (d.sqrMagnitude < 0.04f) continue;
-            int facing = d.x >= 0f ? 1 : -1;
-            float direct = Mathf.Clamp(Mathf.Atan2(d.y, Mathf.Abs(d.x)) * Mathf.Rad2Deg, -85f, 85f);
+            Vector2 t = _targets[i].transform.position;
 
-            // Луч упирается в первое же препятствие, поэтому одного взгляда
-            // «прямо во врага» мало: за гребнем налёт лёг бы на гребень.
-            // Пробуем и соседние углы — какой окажется удачнее, покажет счёт.
-            foreach (float off in _strikeAngles)
+            // Смещения вокруг врага: строй бомб идёт с шагом 2,2 юнита и
+            // сносится в сторону, куда смотрит червь, поэтому середина строя
+            // редко оказывается лучшей точкой.
+            foreach (float off in _strikeOffsets)
             {
-                float ang = Mathf.Clamp(direct + off, -85f, 85f);
-                float x = StrikeX(shooter, ang, facing);
+                float x = Mathf.Clamp(t.x + off, 0f, DestructibleTerrain.WorldWidth);
+
+                // Червь разворачивается к метке — как игрок, которому крестик
+                // сам поворачивает червя (Worm.MarkInput). От этого зависит
+                // снос бомб, так что и считаем с тем же разворотом.
+                int facing = x >= shooter.transform.position.x ? 1 : -1;
+                Vector2 d = new Vector2(x, t.y) - (Vector2)shooter.transform.position;
+                float ang = d.sqrMagnitude > 0.04f
+                          ? Mathf.Clamp(Mathf.Atan2(d.y, Mathf.Abs(d.x)) * Mathf.Rad2Deg, -85f, 85f)
+                          : 0f;
+
                 var cand = new BotShot
                 {
                     Found = true, Weapon = weaponIndex, Angle = ang, Facing = facing, Charge = 1f,
-                    Impact = new Vector2(x, target.transform.position.y),
-                    Score = StrikeScore(shooter, w, x, facing)
+                    Impact = new Vector2(x, t.y), HasMark = true, Mark = new Vector2(x, t.y),
+                    // Минный удар не рвётся, а ложится: урон тот же, но случится
+                    // ли он — вопрос чужого хода. Берём его вполовину, той же
+                    // мерой, что и мину под ногами в Drop.
+                    Score = StrikeScore(shooter, w, x, facing) * (w.Plants ? 0.5f : 1f)
                 };
                 if (cand.Score > best.Score) best = cand;
             }
@@ -543,30 +769,15 @@ public static class BotPlanner
         return best;
     }
 
-    static readonly float[] _strikeAngles = { 0f, -10f, 10f, -28f, 28f };
+    static readonly float[] _strikeOffsets = { 0f, -1.1f, 1.1f, -2.2f, 2.2f, -4.4f, 4.4f };
 
-    /// Куда придётся налёт: тот же луч прицела на 60 юнитов, что и в
-    /// Worm.CallAirStrike. Не попал ни во что — точка в восемнадцати юнитах.
-    static float StrikeX(Worm shooter, float angleDeg, int facing)
-    {
-        float rad = angleDeg * Mathf.Deg2Rad;
-        var dir = new Vector2(Mathf.Cos(rad) * facing, Mathf.Sin(rad));
-        Vector2 origin = (Vector2)shooter.transform.position + dir * 0.95f;
-        var terrain = GameManager.I.Terrain;
-
-        for (float d = 0.3f; d < 60f; d += 0.2f)
-        {
-            Vector2 p = origin + dir * d;
-            if (terrain.IsSolidWorld(p)) return p.x;
-            for (int i = 0; i < _worms.Count; i++)
-            {
-                var o = _worms[i];
-                if (o == null || o.IsDead || o == shooter) continue;
-                if (((Vector2)o.transform.position - p).sqrMagnitude < HitRadius * HitRadius) return p.x;
-            }
-        }
-        return origin.x + dir.x * 18f;
-    }
+    /// Куда падает бомба налёта, по точке рождения. Ветер их не сносит, они не
+    /// скачут и не тикают, поэтому у всех пяти налётов — от обычного до осла —
+    /// полёт один и тот же, и различаются они только начинкой. Пока это была
+    /// одна пятёрка бомб, считать её заново было дёшево; на пяти налётах
+    /// перебор дорос до сотни лишних полётов на каждую точку прицела, и план
+    /// стоил сто миллисекунд вместо двадцати.
+    static readonly Dictionary<long, Vector2> _strikeFall = new Dictionary<long, Vector2>();
 
     /// Пятёрка бомб от верхней кромки карты: те же точки рождения и та же
     /// начальная скорость, что в Worm.CallAirStrike, и тот же полёт.
@@ -581,10 +792,24 @@ public static class BotPlanner
             float dx = (i - (n - 1) * 0.5f) * 2.2f;
             Vector2 p = new Vector2(x + dx - facing * 3f, top + i * 0.6f);
             Vector2 v = new Vector2(facing * 2.5f, -4f);
-            if (Fly(w, shooter, ref p, ref v, Coarse, false)) sum += Score(p, w, shooter);
+
+            // Ключ — сама точка рождения с точностью до сантиметра и сторона
+            // сноса. Кэш живёт один расчёт хода: карта и черви за это время
+            // не меняются.
+            long key = ((long)Mathf.RoundToInt(p.x * 100f) << 24)
+                     ^ ((long)Mathf.RoundToInt(p.y * 100f) << 2) ^ (facing > 0 ? 1L : 0L);
+            if (!_strikeFall.TryGetValue(key, out var hit))
+            {
+                hit = Fly(w, shooter, ref p, ref v, Coarse, false) ? p : NoFall;
+                _strikeFall[key] = hit;
+            }
+            if (hit != NoFall) sum += Score(hit, w, shooter);
         }
         return sum;
     }
+
+    /// «Бомба никуда не долетела»: за край карты и заведомо мимо любой оценки.
+    static readonly Vector2 NoFall = new Vector2(-9999f, -9999f);
 
     /// Закладка под ноги: динамит и мина ложатся на месте, овца уходит вперёд
     /// сама. Ход на этом кончается, но не жизнь — окно отхода даёт боту
@@ -671,12 +896,15 @@ public static class BotPlanner
     /// Пробег овцы: идёт по поверхности со своей скоростью, рвётся от червя под
     /// носом и догорает за пять секунд. Модель грубая, по высоте поверхности,
     /// зато той же длины, что настоящий пробег. false — овца ушла в воду:
-    /// взрыва не будет, и плана тоже.
+    /// взрыва не будет, и плана тоже. Супер-овца этим пробегом только
+    /// начинается: добежав до отрыва, она уходит в небо, и дальше её считает
+    /// SheepFlight.
     static bool SheepBoom(Worm shooter, Weapon w, Vector2 from, int dir, out Vector2 boom)
     {
         var terrain = GameManager.I.Terrain;
         const float Speed = 3.6f;      // Projectile.WalkSpeed
-        float limit = Speed * (w.Fuse > 0f ? w.Fuse : 5f);
+        float walkTime = w.LiftAfter > 0f ? w.LiftAfter : (w.Fuse > 0f ? w.Fuse : 5f);
+        float limit = Speed * walkTime;
         Vector2 p = from;
         boom = from;
 
@@ -701,7 +929,39 @@ public static class BotPlanner
                 if (((Vector2)o.transform.position - p).sqrMagnitude < 0.81f) return true;
             }
         }
+
+        if (w.LiftAfter > 0f) boom = SheepFlight(shooter, w, boom, dir, walkTime);
         return true;
+    }
+
+    /// Полёт супер-овцы после отрыва: те же скорости, что в Projectile.Fly, и
+    /// тот же профиль подъёма (Projectile.FlyRise). Идём шагом по времени и
+    /// смотрим не высоту поверхности, а саму маску: овца летит над рельефом,
+    /// и «поверхность под точкой» о своде пещеры ничего не скажет.
+    static Vector2 SheepFlight(Worm shooter, Weapon w, Vector2 from, int dir, float walked)
+    {
+        var terrain = GameManager.I.Terrain;
+        const float Dt = 0.05f;
+        float left = Mathf.Max(0f, (w.Fuse > 0f ? w.Fuse : 9f) - walked);
+        Vector2 p = from;
+
+        for (float t = 0f; t < left; t += Dt)
+        {
+            p += new Vector2(dir * Projectile.FlySpeed, Projectile.FlyRise(t)) * Dt;
+
+            if (p.x < 0.5f || p.x > DestructibleTerrain.WorldWidth - 0.5f) break;
+            if (p.y < DestructibleTerrain.WaterLevel) break;
+            if (p.y > DestructibleTerrain.WorldHeight + 4f) continue;   // над картой лететь можно
+            if (terrain.IsSolidWorld(p)) break;
+
+            for (int i = 0; i < _worms.Count; i++)
+            {
+                var o = _worms[i];
+                if (o == null || o.IsDead || o == shooter) continue;
+                if (((Vector2)o.transform.position - p).sqrMagnitude < 0.81f) return p;
+            }
+        }
+        return p;
     }
 
     /// Удар вплотную. Модель полёта тут ни при чём: важно, кто стоит рядом и
@@ -1082,6 +1342,131 @@ public static class BotPlanner
     /// Сколько секунд оставляем себе на выстрел после подбора: думать,
     /// наводиться и копить силу. Меньше — и ящик достаётся ценой хода.
     const float ShotReserve = 8f;
+    /// Куда прыгнуть телепортом. Точку выбираем как игрок крестиком: смотрим
+    /// на всю карту, а не на луч прицела, и берём место, где стоять лучше, чем
+    /// сейчас. «Лучше» — это сухо (вода прибывает каждый ход), это на удобной
+    /// дистанции до ближайшего врага, это со свободной линией до него и по
+    /// возможности выше него: сверху вниз стреляется легче всего.
+    ///
+    /// Возвращает не оценку места, а прибавку к тому, где червь стоит: прыжок
+    /// стоит целого хода, и менять шило на мыло незачем. Тонущему червю та же
+    /// формула сама даёт огромную прибавку — сухая земля весит больше всего
+    /// остального.
+    public static bool PlanJump(Worm shooter, out Vector2 point, out float gain)
+    {
+        point = shooter != null ? (Vector2)shooter.transform.position : Vector2.zero;
+        gain = 0f;
+
+        var gm = GameManager.I;
+        if (gm == null || shooter == null || shooter.IsDead) return false;
+        var terrain = gm.Terrain;
+        if (terrain == null) return false;
+
+        Snapshot();
+
+        Worm enemy = null;
+        float bestD = float.MaxValue;
+        Vector2 from = shooter.transform.position;
+        for (int i = 0; i < _worms.Count; i++)
+        {
+            var o = _worms[i];
+            if (o == null || o.IsDead || o.Team == shooter.Team) continue;
+            float d = Vector2.Distance(o.transform.position, from);
+            if (d < bestD) { bestD = d; enemy = o; }
+        }
+        if (enemy == null) return false;
+
+        float here = SpotScore(terrain, from, shooter, enemy);
+        float bestScore = float.NegativeInfinity;
+        Vector2 bestPoint = from;
+
+        // Шаг в полтора юнита: червю в поперечнике один, и место, найденное с
+        // таким шагом, не «почти подходит», а подходит целиком.
+        for (float x = 2f; x <= DestructibleTerrain.WorldWidth - 2f; x += 1.5f)
+        {
+            // Сверху вниз, чтобы верхний ярус многоярусной карты нашёлся
+            // раньше нижнего: он и лучше — с него видно дальше.
+            for (float y = DestructibleTerrain.WorldHeight - 1.5f;
+                 y > DestructibleTerrain.WaterLevel + 2f; y -= 0.5f)
+            {
+                var p = new Vector2(x, y);
+                if (!Standing(terrain, p)) continue;
+
+                float sc = SpotScore(terrain, p, shooter, enemy);
+                if (sc > bestScore) { bestScore = sc; bestPoint = p; }
+
+                // Нашли площадку — следующие полтора юнита вниз это она же.
+                y -= 1.5f;
+            }
+        }
+
+        if (bestScore == float.NegativeInfinity) return false;
+
+        point = bestPoint;
+        gain = bestScore - here;
+        return true;
+    }
+
+    /// Место, где червю есть куда встать: свободный столбик в его рост (те же
+    /// пробы, что в Teleport.FindRoom — иначе прыжок сорвётся) и порода под
+    /// ногами. Без опоры это не площадка, а воздух над пропастью.
+    static bool Standing(DestructibleTerrain terrain, Vector2 p)
+    {
+        if (terrain.IsSolidWorld(p)) return false;
+        if (terrain.IsSolidWorld(p + Vector2.up * 0.9f)) return false;
+        if (terrain.IsSolidWorld(p + new Vector2(0.45f, 0.45f))) return false;
+        if (terrain.IsSolidWorld(p + new Vector2(-0.45f, 0.45f))) return false;
+        return terrain.IsSolidWorld(p + Vector2.down * 0.7f)
+            || terrain.IsSolidWorld(p + Vector2.down * 1.1f);
+    }
+
+    /// Чего стоит место под ногами. Считается и для точки прыжка, и для той,
+    /// где червь стоит сейчас, — разница между ними и есть польза телепорта.
+    static float SpotScore(DestructibleTerrain terrain, Vector2 p, Worm shooter, Worm enemy)
+    {
+        // Сухо. Вода прибывает каждый ход, и низкая площадка — это место,
+        // с которого следующий ход придётся начинать по грудь в море.
+        float score = Mathf.Min(p.y - DestructibleTerrain.WaterLevel, 14f) * 1.6f;
+
+        Vector2 e = enemy.transform.position;
+        float d = Vector2.Distance(p, e);
+
+        // Девять юнитов — дистанция уверенного выстрела: и базука долетает,
+        // и своей воронкой себя не задевает.
+        score -= Mathf.Abs(d - 9f) * 1.1f;
+        if (d < 5f) score -= 30f;
+
+        // Свободная линия до врага — это выстрел уже со следующего хода.
+        if (Visible(terrain, p, e)) score += 25f;
+
+        // Сверху вниз стреляется легче: и видно дальше, и снаряд не упирается
+        // в собственный склон.
+        score += Mathf.Clamp(p.y - e.y, -6f, 6f) * 1.2f;
+
+        // В обнимку с соседом не приземляются: столкнувшиеся черви расталкивают
+        // друг друга, и прыжок кончается падением с чужой головы.
+        for (int i = 0; i < _worms.Count; i++)
+        {
+            var o = _worms[i];
+            if (o == null || o.IsDead || o == shooter) continue;
+            if (((Vector2)o.transform.position - p).sqrMagnitude < 4f) score -= 30f;
+        }
+        return score;
+    }
+
+    /// Видно ли отсюда врага: прямая линия без породы. Шаг в полюйнита —
+    /// стенка тоньше него всё равно не укрытие.
+    static bool Visible(DestructibleTerrain terrain, Vector2 from, Vector2 to)
+    {
+        Vector2 d = to - from;
+        float len = d.magnitude;
+        if (len < 0.5f) return true;
+        d /= len;
+        for (float t = 0.5f; t < len - 0.5f; t += 0.5f)
+            if (terrain.IsSolidWorld(from + d * t)) return false;
+        return true;
+    }
+
 
     /// Ближайший ящик, до которого есть дорога по земле и хватает времени.
     /// Аптечка тем дороже, чем сильнее побит червь; ящик с боезапасом стоит

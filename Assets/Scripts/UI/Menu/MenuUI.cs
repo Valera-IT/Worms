@@ -9,9 +9,15 @@ public class MenuUI : MonoBehaviour
 {
     const int RefW = 1920, RefH = 1080;
 
+    /// Сколько длится проявление из черноты на смене мира (фаза 13f).
+    const float FadeTime = 0.45f;
+
     PanelSettings _panel;
     UIDocument _doc;
-    VisualElement _root;
+    VisualElement _docRoot;   // корень документа: под ним экраны и занавес
+    VisualElement _root;       // слой экранов — его чистят и прячут переходы
+    VisualElement _fade;       // чёрный занавес поверх всего, кликов не ловит
+    float _fadeT;              // сколько черноты осталось, 0 — занавеса нет
     Action _pending;   // экран, запрошенный до того, как панель успела построиться
 
     void Awake()
@@ -32,12 +38,45 @@ public class MenuUI : MonoBehaviour
         if (_root != null) return true;
         var r = _doc != null ? _doc.rootVisualElement : null;
         if (r == null) return false;
-        _root = r;
-        _root.style.flexGrow = 1f;
+        _docRoot = r;
+        _docRoot.style.flexGrow = 1f;
         var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf")
                 ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
-        if (font != null) _root.style.unityFontDefinition = FontDefinition.FromFont(font);
+        if (font != null) _docRoot.style.unityFontDefinition = FontDefinition.FromFont(font);
+
+        // Экраны живут отдельным слоем: занавес обязан пережить и Clear,
+        // и HideAll — иначе он пропадал бы ровно в тот момент, ради которого
+        // и заведён, на переходе «меню → матч».
+        _root = new VisualElement();
+        _root.style.flexGrow = 1f;
+        _docRoot.Add(_root);
+
+        _fade = new VisualElement();
+        _fade.style.position = Position.Absolute;
+        _fade.style.left = 0; _fade.style.right = 0; _fade.style.top = 0; _fade.style.bottom = 0;
+        _fade.style.backgroundColor = Color.black;
+        _fade.style.display = DisplayStyle.None;
+        _fade.pickingMode = PickingMode.Ignore;
+        _docRoot.Add(_fade);
         return true;
+    }
+
+    /// Закрыть экран чернотой и проявить обратно. Зовётся App'ом на всякой
+    /// смене мира: без этого матч возникал в кадре мгновенно, вместе со
+    /// вспышкой сменившегося задника.
+    public void FadeIn()
+    {
+        _fadeT = FadeTime;
+        Paint();
+    }
+
+    void Paint()
+    {
+        if (_fade == null) return;
+        float a = FadeTime > 0f ? Mathf.Clamp01(_fadeT / FadeTime) : 0f;
+        _fade.style.display = a > 0f ? DisplayStyle.Flex : DisplayStyle.None;
+        // Гаснет не линейно: чернота сходит быстро, последние кадры — мягко.
+        _fade.style.opacity = a * a;
     }
 
     void LateUpdate()
@@ -47,6 +86,13 @@ public class MenuUI : MonoBehaviour
             var p = _pending;
             _pending = null;
             p();
+        }
+
+        if (_fadeT > 0f && Ready())
+        {
+            // Время матча может стоять (пауза), занавес — нет.
+            _fadeT = Mathf.Max(0f, _fadeT - Time.unscaledDeltaTime);
+            Paint();
         }
     }
 
@@ -65,6 +111,9 @@ public class MenuUI : MonoBehaviour
         _root.Clear();
         _root.style.display = DisplayStyle.None;
     }
+
+    /// Есть ли сейчас чернота на экране — этим тест видит переход.
+    public bool Fading => _fadeT > 0f;
 
     // --- экраны ---------------------------------------------------------
 

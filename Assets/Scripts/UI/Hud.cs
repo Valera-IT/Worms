@@ -16,6 +16,16 @@ public class Hud : MonoBehaviour
     /// Сколько секунд висит вылетевшая картинка оружия.
     const float PickShow = 1.35f;
 
+    /// Тайминги интерфейса (фаза 13f). Плашка хода выезжает за четверть
+    /// секунды, полоски здоровья доезжают со скоростью «вся полоска за 0,55 с»,
+    /// таймер пульсирует последние пять секунд. Всё считается по
+    /// `unscaledDeltaTime`: на паузе время стоит, а интерфейс обязан доехать.
+    const float PillSlide = 4f;      // 1/0,25 с
+    const float BarSpeed = 1.8f;     // долей здоровья в секунду
+    const float PulseFrom = 5f;      // с какой секунды таймер пульсирует
+    /// На сколько пикселей плашка уходит вверх, когда её нет.
+    const float PillRise = 56f;
+
     PanelSettings _panel;
     UIDocument _doc;
     VisualElement _root;
@@ -29,13 +39,14 @@ public class Hud : MonoBehaviour
 
     VisualElement _turnPill;
     Label _turnText;
+    /// Насколько плашка хода выехала: 0 — убрана за верхний край, 1 — на месте.
+    float _turnIn;
 
     VisualElement _deathPill;
     Label _deathText;
 
     VisualElement _windFill;
 
-    VisualElement _powerWrap, _powerFill;
 
     readonly List<WeaponSlot> _weaponSlots = new List<WeaponSlot>();
     bool _weaponsDirty = true;
@@ -64,10 +75,18 @@ public class Hud : MonoBehaviour
     InputScheme _scheme = (InputScheme)(-1);
     Camera _cam;
 
-    struct TeamRow { public VisualElement Root; public Label Name; public VisualElement HpFill; }
+    /// Полоска здоровья доезжает до нового значения, а не прыгает: `Shown` —
+    /// то, что нарисовано сейчас, оно догоняет настоящее здоровье.
+    /// Раньше это была структура в списке — доля не пережила бы обратной записи.
+    class TeamRow { public VisualElement Root; public Label Name; public VisualElement HpFill; public float Shown = -1f; }
     struct WeaponSlot { public VisualElement Root, Icon; public Label Ammo, Key; public int ShownAmmo; public bool ShownSel; }
-    class WormTag { public VisualElement Root, HpFill; public Label Name, Marker; public int ShownHp; }
+    class WormTag { public VisualElement Root, HpFill; public Label Name, Marker; public int ShownHp; public float Shown = -1f; }
     class Floater { public FloatingLabel Src; public Label View; }
+
+    /// Сколько слоёв интерфейса собрано. Ноль — дерево не построилось: ровно
+    /// это и случалось после «Реванша», когда второй Hud не мог получить свой
+    /// UIDocument. Тестам нужен признак, который видно снаружи.
+    public int Layers => _root != null ? _root.childCount : 0;
 
     // --- жизненный цикл -----------------------------------------------------
 
@@ -78,8 +97,14 @@ public class Hud : MonoBehaviour
 
         _panel = UiPanels.Create("HudPanel", 0);
 
-        _doc = gameObject.AddComponent<UIDocument>();
+        // UIDocument на объекте бывает только один, а «Реванш» вешает Hud
+        // второй раз на тот же GameManager: прежний Hud уничтожен, его документ —
+        // нет. AddComponent в такой ситуации возвращал null, дерево интерфейса
+        // не строилось, и матч начинался без единой кнопки и без управления.
+        _doc = GetComponent<UIDocument>();
+        if (_doc == null) _doc = gameObject.AddComponent<UIDocument>();
         _doc.panelSettings = _panel;
+        _doc.rootVisualElement?.Clear();
 
         TryBuild();
     }
@@ -88,6 +113,9 @@ public class Hud : MonoBehaviour
     {
         if (I == this) I = null;
         if (_panel != null) Destroy(_panel);
+        // Документ уходит вместе с интерфейсом: иначе он остаётся на объекте
+        // матча пустым и мешает следующему Hud.
+        if (_doc != null) Destroy(_doc);
     }
 
     /// В батч-режиме без графики или до первого кадра rootVisualElement может быть
@@ -129,7 +157,6 @@ public class Hud : MonoBehaviour
         BuildTurn();
         BuildFlood();
         BuildWind();
-        BuildPower();
         BuildWeapons();
         BuildWeaponPick();
         BuildHelp();
@@ -297,27 +324,6 @@ public class Hud : MonoBehaviour
         _safe.Add(box);
     }
 
-    void BuildPower()
-    {
-        _powerWrap = HudTheme.Box(HudTheme.Curtain);
-        HudTheme.Round(_powerWrap, 4);
-        var st = _powerWrap.style;
-        st.position = Position.Absolute;
-        // Панель оружия стала выше (иконки плюс название), полоска силы уходит над ней.
-        st.bottom = 178; st.left = Length.Percent(50);
-        st.translate = new Translate(Length.Percent(-50), 0, 0);
-        st.width = 320; st.height = 22;
-        st.paddingLeft = 3; st.paddingRight = 3; st.paddingTop = 3; st.paddingBottom = 3;
-        st.display = DisplayStyle.None;
-
-        _powerFill = HudTheme.Box(new Color(1f, 0.9f, 0.3f));
-        _powerFill.style.height = Length.Percent(100);
-        _powerFill.style.width = Length.Percent(0);
-        HudTheme.Round(_powerFill, 3);
-        _powerWrap.Add(_powerFill);
-        _safe.Add(_powerWrap);
-    }
-
     /// Панель оружия: ряд иконок в рамке. Названия под ней больше нет — его
     /// говорит всплывающий выбор оружия, как в оригинале.
     void BuildWeapons()
@@ -426,7 +432,14 @@ public class Hud : MonoBehaviour
             _pickWeapon = gm.SelectedWeapon;
             var w = Weapon.All[_pickWeapon];
             _pickIcon.style.backgroundImage = new StyleBackground(WeaponIcons.Get(w.Kind));
-            _pickName.text = w.Name.ToUpperInvariant();
+            string title = w.Name.ToUpperInvariant();
+            _pickName.text = title;
+            // «САМОНАВОДЯЩАЯСЯ РАКЕТА» вдвое длиннее прочих названий и в 68
+            // пунктов уезжает за края экрана. Длинным именам сбавляем кегль и
+            // разрядку, короткие остаются как были.
+            float fit = title.Length > 9 ? Mathf.Max(0.42f, 9f / title.Length) : 1f;
+            _pickName.style.fontSize = Mathf.Round(68f * fit);
+            _pickName.style.letterSpacing = Mathf.Round(10f * fit);
             _pickTime = PickShow;
         }
 
@@ -508,7 +521,6 @@ public class Hud : MonoBehaviour
         UpdateTurn(gm);
         UpdateFlood(gm);
         UpdateWind(gm);
-        UpdatePower(gm);
         UpdateWeapons(gm);
         UpdateWeaponPick(gm);
         UpdateSwapButton(gm);
@@ -606,7 +618,11 @@ public class Hud : MonoBehaviour
 
             float max = 100f * team.Worms.Count;
             float frac = max > 0f ? Mathf.Clamp01(team.TotalHealth / max) : 0f;
-            r.HpFill.style.width = Length.Percent(frac * 100f);
+            // Первый кадр рисуем сразу: доезжать полоске от нуля при старте
+            // матча незачем, это не потеря здоровья.
+            r.Shown = r.Shown < 0f ? frac
+                    : Mathf.MoveTowards(r.Shown, frac, BarSpeed * Time.unscaledDeltaTime);
+            r.HpFill.style.width = Length.Percent(r.Shown * 100f);
             r.HpFill.style.backgroundColor = team.Color;
         }
     }
@@ -615,15 +631,41 @@ public class Hud : MonoBehaviour
     {
         string s = gm.State switch
         {
-            GameState.Aim => Mathf.CeilToInt(Mathf.Max(0f, gm.TurnTimeLeft)) + " сек",
+            // Ракета ждёт отметки цели — таймер уступает подсказке: без неё
+            // нажатие «Огонь» выглядит как проглоченное.
+            GameState.Aim => gm.ActiveWorm != null && gm.ActiveWorm.AwaitingTarget
+                           ? "отметь цель"
+                           : Mathf.CeilToInt(Mathf.Max(0f, gm.TurnTimeLeft)) + " сек",
             GameState.Projectile => "выстрел…",
             GameState.Retreat => "отход " + Mathf.CeilToInt(Mathf.Max(0f, gm.TurnTimeLeft)) + " сек",
             GameState.Settle => "…",
             _ => ""
         };
         bool show = s.Length > 0;
-        _turnPill.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
         if (show) _turnText.text = s;
+
+        // Плашка не мигает появлением: она выезжает сверху и уезжает обратно,
+        // а из дерева выключается только доехав — иначе видно, как она
+        // исчезает на половине пути.
+        _turnIn = Mathf.MoveTowards(_turnIn, show ? 1f : 0f, PillSlide * Time.unscaledDeltaTime);
+        _turnPill.style.display = _turnIn > 0f ? DisplayStyle.Flex : DisplayStyle.None;
+        if (_turnIn <= 0f) return;
+
+        float slide = Mathf.SmoothStep(0f, 1f, _turnIn);
+
+        // Последние пять секунд таймер пульсирует и краснеет: цифры на краю
+        // экрана иначе не замечают, пока ход не кончился.
+        float left = gm.TurnTimeLeft;
+        bool hurry = show && left <= PulseFrom
+                  && (gm.State == GameState.Aim || gm.State == GameState.Retreat)
+                  && !(gm.ActiveWorm != null && gm.ActiveWorm.AwaitingTarget);
+        float beat = hurry ? Mathf.Abs(Mathf.Sin(Mathf.Max(0f, left) * Mathf.PI)) : 0f;
+
+        var st = _turnPill.style;
+        st.opacity = slide;
+        st.translate = new Translate(Length.Percent(-50), -PillRise * (1f - slide), 0);
+        st.scale = new Scale(Vector2.one * (1f + beat * 0.16f));
+        _turnText.style.color = hurry ? Color.Lerp(HudTheme.Ink, HudTheme.WindNeg, beat) : HudTheme.Ink;
     }
 
     void UpdateFlood(GameManager gm)
@@ -646,17 +688,6 @@ public class Hud : MonoBehaviour
         st.width = Length.Percent(50f * mag);
         if (gm.Wind >= 0f) { st.left = Length.Percent(50); st.right = StyleKeyword.Auto; }
         else               { st.right = Length.Percent(50); st.left = StyleKeyword.Auto; }
-    }
-
-    void UpdatePower(GameManager gm)
-    {
-        var worm = gm.ActiveWorm;
-        bool show = worm != null && worm.IsCharging;
-        _powerWrap.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
-        if (!show) return;
-        _powerFill.style.width = Length.Percent(worm.Charge * 100f);
-        _powerFill.style.backgroundColor =
-            Color.Lerp(new Color(1f, 0.9f, 0.3f), new Color(1f, 0.25f, 0.2f), worm.Charge);
     }
 
     void UpdateWeapons(GameManager gm)
@@ -727,7 +758,10 @@ public class Hud : MonoBehaviour
             tag.Root.style.left = p.x;
             tag.Root.style.top = p.y;
 
-            tag.HpFill.style.width = Length.Percent(Mathf.Clamp01(worm.Health / 100f) * 100f);
+            float frac = Mathf.Clamp01(worm.Health / 100f);
+            tag.Shown = tag.Shown < 0f ? frac
+                      : Mathf.MoveTowards(tag.Shown, frac, BarSpeed * Time.unscaledDeltaTime);
+            tag.HpFill.style.width = Length.Percent(tag.Shown * 100f);
             tag.HpFill.style.backgroundColor = worm.Team.Color;
 
             int hp = Mathf.CeilToInt(worm.Health);
@@ -847,6 +881,7 @@ public class Hud : MonoBehaviour
     static readonly string[] TouchHelp =
     {
         "Прицел ещё можно тянуть пальцем от червя",
+        "Ракета: стик водит крестик, или ткни пальцем в точку, «Огонь» — метка",
         "Сетка внизу — оружие,  два пальца — зум,  кнопка справа — пауза",
         "Стрелка рядом с паузой — сходить другим червём"
     };

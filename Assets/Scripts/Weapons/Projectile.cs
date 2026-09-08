@@ -22,7 +22,29 @@ public class Projectile : MonoBehaviour
 
     const float HomingDelay = 0.35f;   // столько ракета летит прямо, как из ствола
     const float HomingTurn = 260f;     // градусов в секунду
+    /// Сколько секунд работает двигатель после его запуска. Дальше ракета —
+    /// обычная болванка: доворачивать нечем, и гравитация возвращается к полной.
+    /// Отсюда и способ уйти от ракеты — увести её за гребень и переждать.
+    const float HomingFuel = 3.4f;
+    /// След кладём по пройденному пути, а не по времени: на полной силе базука
+    /// за кадр уходит дальше, чем на четверти, и клубки по таймеру рассыпались
+    /// бы пунктиром тем реже, чем быстрее летит ракета.
+    Vector2 _lastPuff;
+    bool _puffed;
+    const float PuffStep = 0.28f;      // расстояние между клубками, юнитов
     const float WalkSpeed = 3.6f;
+
+    /// Супер-овца в полёте: ход вперёд, рывок вверх на отрыве и размах волны,
+    /// которой она идёт дальше. Волна симметрична — овца не набирает высоту
+    /// без конца, а держит ту, что взяла рывком, и на ней пересекает карту.
+    public const float FlySpeed = 9f;
+    public const float FlyClimb = 11f;
+    public const float FlyClimbTime = 1.2f;
+    public const float FlyWave = 4.5f;
+    public const float FlyWaveRate = 4.5f;
+    /// Сколько воронок осталось пробить бетонному ослу.
+    int _punchesLeft;
+    bool _aloft;
 
     public static Projectile Spawn(Weapon w, Vector2 pos, Vector2 velocity, Worm owner, float radiusScale = 1f, int clusterChildren = 0)
     {
@@ -32,11 +54,16 @@ public class Projectile : MonoBehaviour
 
         // Тому, что лежит и тикает (динамит, мина, овца), круглешок не идёт —
         // берём ту же картинку, что и в панели оружия.
-        bool useIcon = w.Use == WeaponUse.Drop || w.Kind == WeaponKind.Banana;
-        var sr = useIcon
+        bool useIcon = w.Use == WeaponUse.Drop || w.Kind == WeaponKind.Banana
+                    || w.Kind == WeaponKind.HolyGrenade || w.Kind == WeaponKind.Anvil
+                    || w.Kind == WeaponKind.MineStrike || w.Kind == WeaponKind.Donkey;
+        bool rocket = w.Homing || w.Rocket;
+        var sr = rocket
+            ? Sprites.Make("Body", WeaponIcons.Missile, Color.white, 5, go.transform)
+            : useIcon
             ? Sprites.Make("Body", WeaponIcons.Sprite(w.Kind), Color.white, 5, go.transform)
             : Sprites.Make("Body", Sprites.Circle, w.Color, 5, go.transform);
-        if (!useIcon) sr.transform.localScale = Vector3.one * 0.55f;
+        if (!useIcon && !rocket) sr.transform.localScale = Vector3.one * 0.55f;
 
         var col = go.AddComponent<CircleCollider2D>();
         col.radius = useIcon ? 0.3f : 0.22f;
@@ -69,6 +96,7 @@ public class Projectile : MonoBehaviour
         p._baseColor = sr.color;
         p._fuseLeft = w.Fuse;
         p.ClusterChildren = clusterChildren;
+        p._punchesLeft = w.Punches;
         p.transform.localScale = Vector3.one * radiusScale;
 
         // Не взрываемся об самого стрелка в момент выстрела.
@@ -89,8 +117,20 @@ public class Projectile : MonoBehaviour
         if (Weapon.AffectedByWind)
             _rb.AddForce(new Vector2(GameManager.I.Wind * 9f, 0f) * _rb.mass, ForceMode2D.Force);
 
-        if (Weapon.Homing && _life > HomingDelay) Home();
-        if (Weapon.Walker) Walk();
+        if (Weapon.Homing) Thrust();
+        if (Weapon.Walker) { if (Aloft) Fly(); else Walk(); }
+    }
+
+    /// Три фазы полёта ракеты: пуск по стволу, работа двигателя с доворотом,
+    /// свободное падение на остатках скорости.
+    void Thrust()
+    {
+        if (_life <= HomingDelay) return;
+
+        if (_life < HomingDelay + HomingFuel) { Home(); return; }
+
+        // Топливо кончилось: вес возвращается, дальше ракета просто летит.
+        if (_rb.gravityScale < 1f) _rb.gravityScale = 1f;
     }
 
     /// Доворот на цель с ограниченной угловой скоростью: ракета не разворачивается
@@ -129,6 +169,31 @@ public class Projectile : MonoBehaviour
         _rb.linearVelocity = v;
     }
 
+    /// Супер-овца оторвалась от земли. Отрыв считаем по времени с рождения:
+    /// столько же считает и бот (BotPlanner.SheepBoom), а любая другая мера —
+    /// скажем, «после прыжка» — у него бы не сошлась.
+    bool Aloft => Weapon.LiftAfter > 0f && _life > Weapon.LiftAfter;
+
+    /// Полёт супер-овцы: ровный ход вперёд и волна по высоте. Гравитацию
+    /// снимаем — иначе волна на спуске переходила бы в падение, и овца
+    /// втыкалась бы в первый же бугор вместо того, чтобы идти над ним.
+    void Fly()
+    {
+        if (!_aloft)
+        {
+            _aloft = true;
+            _rb.gravityScale = 0f;
+            Sfx.Shot();
+        }
+        _rb.linearVelocity = new Vector2(WalkDir * FlySpeed, FlyRise(_life - Weapon.LiftAfter));
+    }
+
+    /// Вертикальная скорость овцы через t секунд после отрыва. Вынесена в
+    /// статику: тем же выражением бот считает её полёт (BotPlanner.SheepBoom),
+    /// и разъехаться этим двум формулам нельзя.
+    public static float FlyRise(float t)
+        => Mathf.Max(0f, 1f - t / FlyClimbTime) * FlyClimb + Mathf.Sin(t * FlyWaveRate) * FlyWave;
+
     void Update()
     {
         _life += Time.deltaTime;
@@ -143,6 +208,8 @@ public class Projectile : MonoBehaviour
         }
 
         if (Weapon.Walker) _sprite.localScale = new Vector3(WalkDir, 1f, 1f);
+
+        Trail();
 
         if (Weapon.Fuse > 0f)
         {
@@ -166,19 +233,64 @@ public class Projectile : MonoBehaviour
         }
     }
 
+    /// Дымный след. У самонаводящейся он ещё и показания приборов: дым идёт,
+    /// пока работает двигатель, кончился дым — ракета больше не доворачивает.
+    /// У базуки двигатель горит весь полёт, поэтому и след тянется до самого
+    /// взрыва. Клубки кладём в хвост, а не в центр, — иначе они лезут ракете
+    /// на нос.
+    void Trail()
+    {
+        bool on = Weapon.Homing
+                ? _life > HomingDelay && _life < HomingDelay + HomingFuel
+                : Weapon.Rocket || _aloft;
+        if (!on || _exploded) return;
+
+        Vector2 pos = transform.position;
+        if (!_puffed) { _puffed = true; _lastPuff = pos; }
+
+        Vector2 v = _rb.linearVelocity;
+        Vector2 back = v.sqrMagnitude > 0.01f ? -v.normalized : Vector2.zero;
+        Vector2 side = new Vector2(-back.y, back.x);
+
+        // Догоняем ракету шагами по PuffStep: за один кадр она проходит и по
+        // полтора юнита, и один клубок на кадр оставил бы в следе дыры.
+        int guard = 0;
+        while ((pos - _lastPuff).sqrMagnitude >= PuffStep * PuffStep && guard++ < 12)
+        {
+            Vector2 step = (pos - _lastPuff).normalized * PuffStep;
+            _lastPuff += step;
+            Fx.Smoke(_lastPuff + back * 0.3f + side * Random.Range(-0.07f, 0.07f),
+                     Random.Range(0.34f, 0.5f));
+        }
+    }
+
     void OnCollisionEnter2D(Collision2D c)
     {
         if (_exploded) return;
 
-        // Овца рвётся, боднув червя, а от земли просто отталкивается.
+        // Овца рвётся, боднув червя, а от земли просто отталкивается. Та же
+        // овца в воздухе рвётся обо всё подряд: она уже не идёт по карте,
+        // а летит в цель, и отскакивать ей нечем.
         if (Weapon.Walker)
         {
-            if (c.collider.GetComponent<Worm>() != null) Explode();
+            // Первую долю секунды после отрыва землю не считаем: овца уходит
+            // в небо с той самой земли, на которой стояла, и её же касание,
+            // пришедшее шагом физики следом за взлётом, рвало овцу на старте.
+            bool justLifted = _aloft && _life < Weapon.LiftAfter + 0.2f;
+            if ((_aloft && !justLifted) || c.collider.GetComponent<Worm>() != null) Explode();
             return;
         }
 
+        // Бомба минного удара не рвётся, а ложится миной там, где упала.
+        if (Weapon.Plants) { Plant(); return; }
+
+        // Осёл идёт сквозь остров: каждое касание — воронка, и дальше вниз,
+        // пока не кончатся пробои. Последний из них и есть взрыв.
+        if (_punchesLeft > 0) { Punch(); return; }
+
         if (!Weapon.Contact)
         {
+            Ricochet(c);
             if (c.relativeVelocity.sqrMagnitude > 9f) Sfx.Bounce();
             return;
         }
@@ -186,6 +298,7 @@ public class Projectile : MonoBehaviour
         if (Weapon.Bouncy)
         {
             Fx.Splash(transform.position, Weapon.Color, 4, 0.15f);
+            Ricochet(c);
             // Тихие касания на излёте не озвучиваем — иначе граната тарахтит,
             // пока не докатится.
             if (c.relativeVelocity.sqrMagnitude > 4f) Sfx.Bounce();
@@ -194,6 +307,63 @@ public class Projectile : MonoBehaviour
 
         // Ракета взрывается при любом контакте.
         Explode();
+    }
+
+    /// Искры рикошета: чиркнувший о породу снаряд высекает их вдоль отскока.
+    /// Тихие касания на излёте пропускаем — иначе докатывающаяся граната
+    /// сыпала бы искрами до самой остановки.
+    void Ricochet(Collision2D c)
+    {
+        float hit = c.relativeVelocity.sqrMagnitude;
+        if (hit < 9f || c.contactCount == 0) return;
+
+        var contact = c.GetContact(0);
+        Vector2 n = contact.normal;
+        Vector2 inc = c.relativeVelocity.sqrMagnitude > 0.01f ? c.relativeVelocity.normalized : -n;
+        // Отскок плюс доля нормали: как бы ни легло попадание, искры уходят
+        // от поверхности, а не в неё.
+        Vector2 dir = (Vector2.Reflect(inc, n) + n * 0.6f).normalized;
+        Fx.Sparks(contact.point, dir, Mathf.Clamp(Mathf.RoundToInt(hit * 0.2f), 3, 8), 5.5f);
+    }
+
+    /// Заложить мину на месте падения. Мина рисуется своей иконкой и живёт
+    /// своей жизнью — ход она не держит, поэтому снаряд после неё исчезает
+    /// молча, без воронки.
+    void Plant()
+    {
+        if (_exploded) return;
+        _exploded = true;
+
+        Vector2 pos = transform.position;
+        Mine.Drop(MinePayload(Weapon), pos + Vector2.up * 0.1f);
+        Fx.Splash(pos, Weapon.Color, 4, 0.15f);
+        Sfx.Bounce();
+        Vanish();
+    }
+
+    /// Мина минного удара: воронка и урон берутся у налёта, а вид и повадки —
+    /// у обычной мины, потому что это она и есть.
+    static Weapon MinePayload(Weapon strike) => new Weapon
+    {
+        Kind = WeaponKind.Mine,
+        Name = "Мина",
+        Use = WeaponUse.Drop,
+        BlastRadius = strike.BlastRadius,
+        Damage = strike.Damage,
+        Contact = false,
+        Color = strike.Color
+    };
+
+    /// Пробой: воронка вполовину меньше взрывной, скорость вниз восстанавливается,
+    /// и осёл проваливается дальше. Порода перед ним уже вынута воронкой, так
+    /// что следующего касания он ждёт, пока не дойдёт до нижней кромки полости.
+    void Punch()
+    {
+        _punchesLeft--;
+        Vector2 pos = transform.position;
+        Combat.Detonate(pos, Weapon.BlastRadius * 0.55f, Weapon.Damage * 0.5f, true);
+        Sfx.Explosion(Weapon.BlastRadius * 0.55f);
+        _rb.linearVelocity = new Vector2(_rb.linearVelocity.x * 0.2f, -16f);
     }
 
     public void Explode()
@@ -215,26 +385,32 @@ public class Projectile : MonoBehaviour
     {
         bool banana = Weapon.Kind == WeaponKind.Banana;
         bool mortar = Weapon.Kind == WeaponKind.Mortar;
+        // Напалм рассыпается каплями: они скачут по склону и рвутся от касания
+        // червя, а не по фитилю. Каждая почти безобидна — берёт их число.
+        bool napalm = Weapon.Kind == WeaponKind.Napalm;
 
         var child = new Weapon
         {
             Kind = WeaponKind.Grenade,
-            Name = banana ? "Долька" : "Осколок",
-            BlastRadius = banana ? 2.4f : mortar ? 1.8f : 1.8f,
-            Damage = banana ? 28f : mortar ? 18f : 22f,
-            Fuse = banana ? 1.6f : mortar ? 0f : 1.2f,
+            Name = napalm ? "Капля" : banana ? "Долька" : "Осколок",
+            BlastRadius = napalm ? 1.1f : banana ? 2.4f : 1.8f,
+            Damage = napalm ? 12f : banana ? 28f : mortar ? 18f : 22f,
+            Fuse = napalm ? 2.2f : banana ? 1.6f : mortar ? 0f : 1.2f,
             Bouncy = !mortar,
             Contact = mortar,
-            Color = banana ? new Color(0.98f, 0.85f, 0.25f) : new Color(1f, 0.85f, 0.35f)
+            Color = napalm ? new Color(1f, 0.62f, 0.18f)
+                  : banana ? new Color(0.98f, 0.85f, 0.25f) : new Color(1f, 0.85f, 0.35f)
         };
 
         for (int i = 0; i < ClusterChildren; i++)
         {
-            float span = banana ? 140f : mortar ? 40f : 60f;
+            float span = napalm ? 170f : banana ? 140f : mortar ? 40f : 60f;
             float mid = mortar ? -90f : 90f;
             float ang = mid - span * 0.5f + span / Mathf.Max(1, ClusterChildren - 1) * i + Random.Range(-8f, 8f);
             var dir = new Vector2(Mathf.Cos(ang * Mathf.Deg2Rad), Mathf.Sin(ang * Mathf.Deg2Rad));
-            float speed = mortar ? Random.Range(9f, 12f) : Random.Range(7f, 11f);
+            float speed = mortar ? Random.Range(9f, 12f)
+                        : napalm ? Random.Range(4f, 7f)
+                        : Random.Range(7f, 11f);
             Spawn(child, pos + dir * 0.6f, dir * speed, null, 0.8f);
         }
     }

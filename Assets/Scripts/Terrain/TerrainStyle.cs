@@ -149,8 +149,8 @@ public class TerrainStyle
             Sky = new Color(0.86f, 0.72f, 0.55f),
             Water = new Color(0.24f, 0.42f, 0.62f, 0.75f)            ,
             SkyTop = new Color(0.58f, 0.44f, 0.52f),
-            RidgeFar = new Color(0.66f, 0.48f, 0.44f),
-            RidgeNear = new Color(0.48f, 0.31f, 0.30f),
+            RidgeFar = new Color(0.70f, 0.45f, 0.34f),      // столовые горы держат цвет породы:
+            RidgeNear = new Color(0.52f, 0.28f, 0.20f),     // на сером они тонули в дымке
             Decor = DecorKind.Cactus,
             DecorCount = 24,
             DirtEdge = new Color32(112, 56, 30, 255),

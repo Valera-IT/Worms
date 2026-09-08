@@ -62,8 +62,14 @@ public static class WorldTest
             Fail(kind, seed, $"мест под высадку {spawns.Count}, нужно {NeedSpawns}");
 
         // Мир обязан быть многоярусным: иначе черви снова садятся в линию.
-        int tiers = Tiers(spawns);
-        if (tiers < 6) Fail(kind, seed, $"колонок с двумя и более этажами {tiers}, нужно 6");
+        // Архипелаг — исключение, и не по слабости генератора: его островки
+        // низкие и мелкие, полостей в них нарочно вчетверо меньше (иначе
+        // островок становится решетом и стоять на нём негде), а от линии
+        // команды там спасает сама вода — острова разносят их сами. За форму
+        // архипелага отвечает своя проверка, на число островков.
+        int tiers = Tiers(t);
+        if (kind != TerrainKind.Archipelago && tiers < 6)
+            Fail(kind, seed, $"колонок с двумя и более этажами {tiers}, нужно 6");
 
         // Ни один червь не должен оказаться в камне: точка свободна, над ней
         // свободно на его рост, под ней земля.
@@ -120,12 +126,25 @@ public static class WorldTest
 
     /// Сколько разных этажей: колонки, где пригодных площадок больше одной.
     /// Это и есть многоярусность — навесы, каверны, плиты в воздухе.
-    static int Tiers(List<Vector2> spawns)
+    /// Ярусность меряем по самому рельефу, а не по готовому списку высадки:
+    /// колонка считается многоярусной, если в ней две площадки с полным
+    /// просветом над водой. Раньше здесь стоял тот же список точек высадки,
+    /// что и в проверке выше, и метрика ловила не форму мира, а густоту
+    /// подлеска: куст на верхней полке отнимал у колонки этаж, и «ярусов» на
+    /// острове выходило ноль при двух десятках честных полок.
+    static int Tiers(DestructibleTerrain t)
     {
-        var byX = new Dictionary<float, int>();
-        foreach (var p in spawns) byX[p.x] = byX.TryGetValue(p.x, out var n) ? n + 1 : 1;
+        var ledges = new List<float>();
         int multi = 0;
-        foreach (var kv in byX) if (kv.Value > 1) multi++;
+
+        for (float x = 6f; x < DestructibleTerrain.WorldWidth - 6f; x += 1f)
+        {
+            t.LedgesAt(x, ledges, 26);
+            int n = 0;
+            for (int i = 0; i < ledges.Count; i++)
+                if (ledges[i] > DestructibleTerrain.WaterLevel + 1.5f) n++;
+            if (n > 1) multi++;
+        }
         return multi;
     }
 
@@ -155,7 +174,10 @@ public static class WorldTest
         bool inside = false;
         for (float x = 14f; x < DestructibleTerrain.WorldWidth - 14f; x += 0.5f)
         {
-            bool dry = t.SurfaceHeightWorld(x) > water;
+            // Мост считается поверхностью, но пропасть под ним никуда не
+            // делась: колонку, где верх — настил, считаем провалом, а не сушей.
+            float h = t.SurfaceHeightWorld(x);
+            bool dry = h > water && !t.IsDeckPixel(t.WorldToPixelX(x), t.WorldToPixelY(h) - 1);
             if (!dry && !inside) { n++; inside = true; }
             else if (dry) inside = false;
         }

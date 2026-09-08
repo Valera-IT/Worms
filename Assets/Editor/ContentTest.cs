@@ -145,12 +145,26 @@ public static class ContentTest
         if (_step == 11 && t > 25.0) { _step = 12; CheckTools(gm); }
         if (_step == 12 && t > 25.5) { _step = 13; ChuteDrop(gm); }
         if (_step == 13 && t > 25.9) { _step = 14; OpenChute(gm); }
-        if (_step == 14 && t > 27.2) { _step = 15; CheckChute(gm); Finish(); }
+        if (_step == 14 && t > 27.2) { _step = 15; CheckChute(gm); }
+        if (_step == 15 && t > 27.6) { _step = 16; LaunchHoming(gm); }
+        if (_step == 16 && t > 29.6) { _step = 17; CheckHoming(); Finish(); }
+
+        // Расстояние до отмеченной точки меряем каждый кадр: ракета рвётся,
+        // дойдя до цели, и к следующему шагу от неё уже ничего не осталось.
+        if (_missile != null)
+            _homeBest = Mathf.Min(_homeBest, Vector2.Distance(_missile.transform.position, _homeAt));
     }
 
     // --- парашют и ранец ---------------------------------------------------
 
     static Worm _flier;
+
+    /// Самонаводящаяся ракета: пущенный снаряд, отмеченная точка и лучшее
+    /// расстояние до неё за весь полёт.
+    static Projectile _missile;
+    static Vector2 _homeAt;
+    static float _homeBest = float.MaxValue;
+    static bool _homeSkip;
     static float _flierHealth;
 
     /// Роняем червя с высоты, где падение без купола стоило бы здоровья.
@@ -262,14 +276,22 @@ public static class ContentTest
         // в пещере над полом кровля, и «просто повыше» пустоты не гарантирует.
         Vector2 air = Vector2.zero;
         bool space = false;
+        // Ниже нуля карты нет вовсе, а IsSolidWorld за её краем честно
+        // отвечает «пусто» — и в пещере, где уровень воды отрицательный,
+        // «пустота под балку» находилась под днищем мира: балка туда не
+        // вставала, и тест винил в этом коллайдер.
+        float floor = Mathf.Max(3f, DestructibleTerrain.WaterLevel + 3f);
         for (float x = 8f; x < DestructibleTerrain.WorldWidth - 8f && !space; x += 2f)
-            for (float y = DestructibleTerrain.WaterLevel + 3f;
-                 y < DestructibleTerrain.WorldHeight - 3f && !space; y += 1f)
+            for (float y = floor; y < DestructibleTerrain.WorldHeight - 3f && !space; y += 1f)
             {
                 var probe = new Vector2(x, y);
                 bool clear = true;
+                // Пустоту требуем и над балкой, и под ней: прижатая к кровле
+                // балка сливается с ней в один контур, и «контуров прибавилось»
+                // перестаёт что-либо значить.
                 for (float dx = -2.4f; dx <= 2.4f && clear; dx += 0.4f)
-                    clear = !terrain.IsSolidWorld(probe + new Vector2(dx, 0f));
+                    for (float dy = -1.2f; dy <= 1.2f && clear; dy += 0.4f)
+                        clear = !terrain.IsSolidWorld(probe + new Vector2(dx, dy));
                 if (!clear) continue;
                 air = probe;
                 space = true;
@@ -287,8 +309,12 @@ public static class ContentTest
         for (int k = 0; k <= 6; k++)
             if (terrain.IsSolidWorld(air + new Vector2(-1.8f + 0.6f * k, 0f))) onBeam++;
         if (onBeam < 7) Fail($"балка дырявая: сплошных точек {onBeam} из 7");
-        if (terrain.ColliderPathCount <= pathsBefore)
-            Fail("балка не попала в коллайдер: контуров не прибавилось");
+        // Главное — не число контуров (балка у стены сливается с ней в один),
+        // а то, что физика балку видит: на неё вставать.
+        Physics2D.SyncTransforms();
+        var under = Physics2D.OverlapCircle(air, 0.25f);
+        bool inPhysics = under != null && under.GetComponentInParent<DestructibleTerrain>() != null;
+        if (!inPhysics) Fail("балка не попала в коллайдер: физика её не видит");
 
         // Инструменты — снаряжение без урона, бот их не берёт.
         foreach (var kind in new[] { WeaponKind.Drill, WeaponKind.Blowtorch, WeaponKind.Girder })
@@ -300,6 +326,68 @@ public static class ContentTest
 
         Debug.Log($"CONTENT step12: рез {stillSolid} точек в породе из 11, балка {onBeam} из 7, " +
                   $"контуров {pathsBefore} → {terrain.ColliderPathCount}");
+    }
+
+    // --- самонаводящаяся ракета ---------------------------------------------
+
+    /// Ракета идёт в отмеченную точку, а не в червя: цель ставим в пустоту,
+    /// где никого нет, и пускаем снаряд отвесно вверх. Долетит — значит,
+    /// доворот ведёт его по метке, а не по ближайшему телу.
+    ///
+    /// Небо под опыт не ищем, а выжигаем сами: на случайной карте просвет в
+    /// два десятка юнитов находился в лучшем случае через раз, и проверка
+    /// чаще пропускалась, чем шла.
+    static void LaunchHoming(GameManager gm)
+    {
+        var terrain = gm.Terrain;
+        _homeBest = float.MaxValue;
+        _homeSkip = false;
+
+        float y = Mathf.Clamp(DestructibleTerrain.WaterLevel + 16f,
+                              8f, DestructibleTerrain.WorldHeight - 14f);
+        var from = new Vector2(DestructibleTerrain.WorldWidth * 0.5f - 8f, y);
+
+        // Коридор: цепочка воронок вправо и вверх — ракете нужно место и на
+        // подъём до включения двигателя, и на дугу доворота.
+        for (int i = 0; i < 5; i++)
+        {
+            terrain.Explode(from + new Vector2(i * 4.5f, 1f), 7f);
+            terrain.Explode(from + new Vector2(i * 4.5f, 8f), 7f);
+        }
+
+        _homeAt = from + new Vector2(14f, 0f);
+
+        var w = Weapon.All[Weapon.IndexOf(WeaponKind.Homing)];
+
+        // Вверх бьём слабо: на полном заряде ракета до включения двигателя
+        // уходит на четырнадцать юнитов и втыкается в кровлю раньше, чем
+        // успевает развернуться, — а мерить надо доворот, а не потолок.
+        _missile = Projectile.Spawn(w, from, new Vector2(0f, w.LaunchSpeed * 0.22f), null);
+        _missile.HomeTarget = _homeAt;
+
+        var near = Physics2D.OverlapCircleAll(from, 1.2f);
+        string what = "";
+        foreach (var c in near) what += c.name + " ";
+
+        Debug.Log($"CONTENT step16: ракета пущена вверх из {from.x:0.0};{from.y:0.0}, " +
+                  $"метка в {_homeAt.x:0.0};{_homeAt.y:0.0}, рядом [{what.Trim()}]");
+    }
+
+    static void CheckHoming()
+    {
+        if (_homeSkip) return;
+
+        bool gone = _missile == null;
+        Debug.Log($"CONTENT step17: ракета подошла к метке на {_homeBest:0.0} юнита, " +
+                  $"{(gone ? "рванула" : "ещё летит")}");
+
+        // Пуск был отвесно вверх, а метка сбоку: без доворота ближе четырнадцати
+        // юнитов ракета к ней не окажется никогда.
+        if (_homeBest > 2.5f) Fail($"ракета не пришла в отмеченную точку: {_homeBest:0.0} юнита");
+
+        // Взрыв в самой метке не требуем: расстояние меряется каждый кадр, а
+        // порог подрыва проверяется шагом физики — между двумя шагами ракета
+        // успевает пройти метку насквозь, и это не промах.
     }
 
     // --- звук --------------------------------------------------------------

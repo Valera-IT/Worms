@@ -7,7 +7,10 @@ public enum WeaponKind
     Dynamite, Mine, Sheep, AirStrike,
     Rope, Teleport, Prod,
     Drill, Blowtorch, Girder,
-    Parachute, Jetpack
+    Parachute, Jetpack,
+
+    // Оружие-визитки: то, ради чего в оригинале берегли ход.
+    HolyGrenade, SuperSheep, Anvil, Napalm, MineStrike, Donkey
 }
 
 /// Как оружие применяется. От этого зависит и ввод (набор силы или одно нажатие),
@@ -46,7 +49,14 @@ public class Weapon
     public bool AffectedByWind;
     public bool Bouncy;
     public bool Contact = true;   // рвётся от касания; динамит и овца — нет
-    public bool Homing;           // доворачивает на ближайшего врага
+    /// Самонаводящаяся ракета: цель отмечается на карте до выстрела, и уже
+    /// после запуска ракета доворачивает на эту точку. Точка статична —
+    /// сдвинувшийся червь ракету за собой не уводит.
+    public bool Homing;
+    /// Летит ракетой: в воздухе это корпус с оперением, а не круглешок, и за
+    /// ним тянется дымный след. У самонаводящейся это подразумевается само —
+    /// признак нужен обычной базуке.
+    public bool Rocket;
     public bool Walker;           // сам идёт по земле (овца)
     public int Cluster;           // на сколько осколков рассыпается при взрыве
     public int Burst = 1;         // сколько выстрелов в очереди у мгновенного оружия
@@ -62,6 +72,17 @@ public class Weapon
     /// Сколько секунд тяги у ранца.
     public float Fuel;
 
+    /// Через сколько секунд ходьбы снаряд отрывается от земли (супер-овца).
+    /// 0 — не отрывается никогда, как обычная овца.
+    public float LiftAfter;
+
+    /// Снаряд не рвётся о землю, а ложится на неё миной (минный удар).
+    public bool Plants;
+
+    /// Сколько раз снаряд пробивает породу насквозь, прежде чем взорваться
+    /// (бетонный осёл). Каждый пробой — своя воронка по пути вниз.
+    public int Punches;
+
     /// Вся очередь уходит одним нажатием, пулями подряд во времени (узи).
     /// Иначе каждый выстрел очереди — отдельное нажатие, и между ними червь
     /// стоит на месте с тем же стволом и может перецелиться (дробовик).
@@ -76,6 +97,12 @@ public class Weapon
     public int Ammo;              // -1 = бесконечно
 
     public bool Hitscan => Use == WeaponUse.Hitscan;
+
+    /// Оружие, которому нужна отметка на карте, а не угол ствола: ракета,
+    /// налёт и телепорт. Как в оригинале — выбрал такое, и ход уходит крестику:
+    /// он ездит по карте, камера едет за ним, нажатие ставит метку. Ракета
+    /// после метки ещё набирает силу, налёт и телепорт срабатывают сразу.
+    public bool Targeted => Homing || Use == WeaponUse.Strike || Use == WeaponUse.Teleport;
 
     /// Что бот берёт в руки. Баллистику и луч он считает моделью полёта, налёт —
     /// падением пятёрки бомб, удар вплотную — просто по тому, кто стоит рядом,
@@ -93,8 +120,8 @@ public class Weapon
     /// они режут и достраивают породу, а не рвут её воронкой.
     public static readonly Weapon[] All =
     {
-        new Weapon { Kind = WeaponKind.Bazooka,  Name = "Базука",   LaunchSpeed = 56f, BlastRadius = 3.0f, Damage = 45f, AffectedByWind = true,  Color = new Color(0.85f, 0.25f, 0.2f),  Ammo = -1 },
-        new Weapon { Kind = WeaponKind.Homing,   Name = "Ракета",   LaunchSpeed = 44f, BlastRadius = 2.8f, Damage = 40f, Homing = true,          Color = new Color(0.95f, 0.45f, 0.15f), Ammo = 2  },
+        new Weapon { Kind = WeaponKind.Bazooka,  Name = "Базука",   LaunchSpeed = 56f, BlastRadius = 3.0f, Damage = 45f, AffectedByWind = true,  Rocket = true, Color = new Color(0.85f, 0.25f, 0.2f),  Ammo = -1 },
+        new Weapon { Kind = WeaponKind.Homing,   Name = "Самонаводящаяся ракета", LaunchSpeed = 44f, BlastRadius = 2.8f, Damage = 40f, Homing = true,          Color = new Color(0.95f, 0.45f, 0.15f), Ammo = 2  },
         new Weapon { Kind = WeaponKind.Mortar,   Name = "Миномёт",  LaunchSpeed = 48f, BlastRadius = 1.8f, Damage = 20f, AffectedByWind = true,  Cluster = 4, Color = new Color(0.55f, 0.6f, 0.65f), Ammo = 3 },
         new Weapon { Kind = WeaponKind.Grenade,  Name = "Граната",  LaunchSpeed = 48f, BlastRadius = 3.4f, Damage = 50f, Fuse = 3.5f, Bouncy = true, Color = new Color(0.35f, 0.7f, 0.3f), Ammo = -1 },
         new Weapon { Kind = WeaponKind.Cluster,  Name = "Кассета",  LaunchSpeed = 52f, BlastRadius = 2.2f, Damage = 25f, AffectedByWind = true,  Cluster = 5, Color = new Color(0.95f, 0.75f, 0.2f), Ammo = 4 },
@@ -131,7 +158,44 @@ public class Weapon
         // падение, из которого ещё надо успеть выстрелить, а ранец — способ
         // добраться до позиции, а не сам ход.
         new Weapon { Kind = WeaponKind.Parachute, Name = "Парашют", Use = WeaponUse.Chute, Utility = true, Color = new Color(0.85f, 0.9f, 0.98f), Ammo = 2 },
-        new Weapon { Kind = WeaponKind.Jetpack,   Name = "Ранец",   Use = WeaponUse.Jet,   Utility = true, Fuel = 3.2f, Color = new Color(0.95f, 0.6f, 0.35f), Ammo = 1 }
+        new Weapon { Kind = WeaponKind.Jetpack,   Name = "Ранец",   Use = WeaponUse.Jet,   Utility = true, Fuel = 3.2f, Color = new Color(0.95f, 0.6f, 0.35f), Ammo = 1 },
+
+        // Визитки оригинала: по одной штуке на матч, каждая решает партию.
+        // Стоят в конце списка по той же причине, что и толчок, — цифровые
+        // клавиши 1-9 и 0 закреплены за первой десяткой стволов и не должны
+        // разъезжаться от каждого нового оружия.
+        //
+        // Ни одно из шести не заводит своего WeaponUse: святая граната — та же
+        // скачущая граната с фитилём, супер-овца — та же закладка-ходок, а
+        // наковальня, напалм, минный удар и осёл идут налётом. Разница вся
+        // в полезной нагрузке и в цифрах.
+        new Weapon { Kind = WeaponKind.HolyGrenade, Name = "Святая граната", LaunchSpeed = 46f, BlastRadius = 6.8f, Damage = 110f, Fuse = 5f, Bouncy = true, Color = new Color(0.96f, 0.9f, 0.55f), Ammo = 1 },
+
+        // Овца с ранцем: две с половиной секунды бежит ногами, потом уходит
+        // в небо волной и рвётся обо всё, чего коснётся. Фитиль длинный —
+        // иначе она догорала бы, не долетев до соседнего острова.
+        new Weapon { Kind = WeaponKind.SuperSheep, Name = "Супер-овца", Use = WeaponUse.Drop, BlastRadius = 4.6f, Damage = 70f, Fuse = 9f, Contact = false, Walker = true, LiftAfter = 2.5f, Color = new Color(0.86f, 0.92f, 1f), Ammo = 1 },
+
+        // Наковальни падают отвесно: ветер их не сносит, воронка узкая, а
+        // урон в ней больше, чем у бомбы налёта, — это удар по темени, а не
+        // ковровое бомбометание.
+        new Weapon { Kind = WeaponKind.Anvil, Name = "Наковальня", Use = WeaponUse.Strike, BlastRadius = 1.7f, Damage = 60f, Burst = 3, Color = new Color(0.42f, 0.45f, 0.52f), Ammo = 1 },
+
+        // Напалм: четыре бака, каждый рассыпается шестью каплями. Порознь
+        // капли почти безобидны, но накрывают склон целиком и достают из-за
+        // укрытия, куда прямой выстрел не проходит.
+        new Weapon { Kind = WeaponKind.Napalm, Name = "Напалм", Use = WeaponUse.Strike, BlastRadius = 1.4f, Damage = 14f, Burst = 4, Cluster = 6, Color = new Color(0.98f, 0.55f, 0.15f), Ammo = 1 },
+
+        // Минный удар: те же пять бомб, но они не рвутся, а ложатся минами
+        // там, где упали. Ход он не выигрывает — он портит карту противнику.
+        new Weapon { Kind = WeaponKind.MineStrike, Name = "Минный удар", Use = WeaponUse.Strike, BlastRadius = 2.4f, Damage = 35f, Burst = 5, Plants = true, Color = new Color(0.6f, 0.62f, 0.66f), Ammo = 1 },
+
+        // Бетонный осёл: падает с неба и уходит сквозь остров, пробивая по
+        // воронке за раз. Не оружие против червя, а способ разрезать карту:
+        // десяти пробоев хватает, чтобы шахта прошла толщу насквозь и вода
+        // добралась до того, кто прятался под ней. Меньшим числом осёл
+        // застревал в породе и оставлял просто глубокую воронку.
+        new Weapon { Kind = WeaponKind.Donkey, Name = "Бетонный осёл", Use = WeaponUse.Strike, BlastRadius = 3.2f, Damage = 60f, Burst = 1, Punches = 10, Color = new Color(0.66f, 0.62f, 0.58f), Ammo = 1 }
     };
 
     /// Индекс в All по типу — чтобы ящик с припасами и меню не искали его руками.

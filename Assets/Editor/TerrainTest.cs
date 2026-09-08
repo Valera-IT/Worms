@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -48,6 +49,23 @@ public static class TerrainTest
 
     static bool IsTerrain(Collider2D c) => c != null && c.GetComponentInParent<DestructibleTerrain>() != null;
 
+    /// Все полки маски по всей карте: колонка за колонкой, этаж за этажом.
+    /// Просвет берём тот же, что у ходьбы, — иначе в список попадут щели,
+    /// куда червь не влезает, и коллайдер там никто не обещал.
+    static List<Vector2> Ledges(DestructibleTerrain t)
+    {
+        var pts = new List<Vector2>();
+        var buf = new List<float>();
+
+        for (float x = 2f; x < DestructibleTerrain.WorldWidth - 2f; x += 0.25f)
+        {
+            t.LedgesAt(x, buf, 14);
+            for (int i = 0; i < buf.Count; i++)
+                if (buf[i] > DestructibleTerrain.WaterLevel + 1f) pts.Add(new Vector2(x, buf[i]));
+        }
+        return pts;
+    }
+
     /// Колонка, по которой червь может пройти: над водой и без обрыва рядом.
     static bool Walkable(float x)
     {
@@ -86,10 +104,16 @@ public static class TerrainTest
             // Пробуем все площадки карты, а не только верхний силуэт: с
             // навесами и кавернами коллайдер сшивается ещё и под землёй,
             // а по одному силуэту у швов почти не остаётся точек.
-            foreach (var spawn in _terrain.CollectSpawnPoints(0.25f))
+            //
+            // Берём именно полки маски, а не готовые точки высадки. Точка
+            // высадки — это ещё и ровное место без куста над головой; таких
+            // на карте семь десятков, и на девять швов их приходится одна.
+            // Сшивку чанков это не мерит никак: сравнивать надо всё, где
+            // коллайдер вообще обязан быть.
+            foreach (var spawn in Ledges(_terrain))
             {
                 float x = spawn.x;
-                float h = spawn.y - 0.8f;
+                float h = spawn.y;
                 var p = new Vector2(x, h + 1.0f);
 
                 bool bad = false;

@@ -24,6 +24,9 @@ public class TouchInput : IHumanInput
     public float AimAxis { get; private set; }
     public bool HasAimTarget { get; private set; }
     public Vector2 AimTarget { get; private set; }
+    /// Крестик игрок водит сам: готовой точки у живого ввода нет.
+    public bool HasMark => false;
+    public Vector2 Mark => Vector2.zero;
     public bool JumpPressed { get; private set; }
     public bool FirePressed { get; private set; }
     public bool FireHeld { get; private set; }
@@ -77,8 +80,10 @@ public class TouchInput : IHumanInput
     const float GrabScreenFraction = 0.16f;
 
     /// Сколько держать палец у червя, прежде чем пойдёт набор силы. Более короткое
-    /// касание — промах по червю, а не выстрел.
-    const float AimArmTime = 0.12f;
+    /// касание — промах по червю, а не выстрел. Прежние 0,12 с срабатывали от
+    /// любого касания рядом с червём: полоса силы дёргалась там, где игрок
+    /// всего лишь поправлял прицел.
+    const float AimArmTime = 0.22f;
 
     /// Порог рывка вверх для прыжка, в радиусах стика в секунду.
     const float JumpFlickSpeed = 3.5f;
@@ -88,6 +93,20 @@ public class TouchInput : IHumanInput
     /// на нажатие вяло, будто ход прилипал к центру.
     const float StickDead = 0.10f;
     const float StickFull = 0.65f;
+
+    /// Наводка самонаводящейся ракеты. Пока крестик не поставлен, стик водит
+    /// его обеими осями, а любой другой палец кладёт крестик прямо в точку,
+    /// куда ткнули. Ходить, прыгать и целиться в это время всё равно нечем:
+    /// червь стоит, и выстрел ещё не начат — значит, и жесты можно отдать
+    /// целиком под наводку.
+    static bool Marking
+    {
+        get
+        {
+            var gm = GameManager.I;
+            return gm != null && gm.ActiveWorm != null && gm.ActiveWorm.AwaitingTarget;
+        }
+    }
 
     static Rect Safe => Screen.safeArea;
     static float StickRadius => Mathf.Min(Safe.width, Safe.height) * 0.12f;
@@ -161,7 +180,10 @@ public class TouchInput : IHumanInput
         if (_uiFireHeld) { FireHeld = true; Active = true; }
         if (_uiFireUp) { _uiFireUp = false; FireReleased = true; Active = true; }
 
-        if (!HasAimTarget && Mathf.Abs(_uiAim) > 0.01f) { AimAxis = _uiAim; Active = true; }
+        // Кнопки наклона — запасной ход: если вертикаль уже задана стиком
+        // (наводка) или пальцем по карте, они молчат.
+        if (!HasAimTarget && Mathf.Abs(AimAxis) < 0.01f && Mathf.Abs(_uiAim) > 0.01f)
+        { AimAxis = _uiAim; Active = true; }
     }
 
     void Collect(Touchscreen ts)
@@ -238,7 +260,10 @@ public class TouchInput : IHumanInput
                 continue;
             }
 
-            if (_aimId < 0 && NearActiveWorm(f.Pos))
+            // В наводке крестик ставят тычком по любому месту карты, а не
+            // протяжкой от червя: до червя ещё надо дотянуться, а цель может
+            // быть в другом конце экрана.
+            if (_aimId < 0 && (Marking || NearActiveWorm(f.Pos)))
             {
                 _aimId = f.Id;
                 _aimStart = f.Pos;
@@ -304,12 +329,26 @@ public class TouchInput : IHumanInput
              ? 0f
              : Mathf.Sign(h) * Mathf.Clamp01((mag - StickDead) / (StickFull - StickDead));
 
-        float dt = Mathf.Max(Time.deltaTime, 1e-4f);
-        float upSpeed = (pos.y - _stickPrev.y) / dt / r;
-        if (!_jumpedThisTouch && d.y > r * 0.30f && upSpeed > JumpFlickSpeed)
+        if (Marking)
         {
-            JumpPressed = true;
-            _jumpedThisTouch = true;
+            // Вторая ось стика — вертикаль крестика, с той же кривой, что и ход.
+            // Рывок вверх в наводке прыжком не считаем: прыгать всё равно
+            // некуда, а крестик от него дёргался бы вверх скачком.
+            float v = Mathf.Clamp(d.y / r, -1f, 1f);
+            float vmag = Mathf.Abs(v);
+            AimAxis = vmag < StickDead
+                    ? 0f
+                    : Mathf.Sign(v) * Mathf.Clamp01((vmag - StickDead) / (StickFull - StickDead));
+        }
+        else
+        {
+            float dt = Mathf.Max(Time.deltaTime, 1e-4f);
+            float upSpeed = (pos.y - _stickPrev.y) / dt / r;
+            if (!_jumpedThisTouch && d.y > r * 0.30f && upSpeed > JumpFlickSpeed)
+            {
+                JumpPressed = true;
+                _jumpedThisTouch = true;
+            }
         }
         _stickPrev = pos;
 
@@ -337,6 +376,12 @@ public class TouchInput : IHumanInput
         AimActive = true;
         Vector3 world = cam.ScreenToWorldPoint(new Vector3(pos.x, pos.y, -cam.transform.position.z));
         AimTarget = world;
+        Active = true;
+
+        // В наводке палец только возит крестик. Взвод тут был бы ловушкой:
+        // подтверждение цели уходило бы случайным отрывом пальца, а отменить
+        // его нечем. Метку ставит кнопка «Огонь».
+        if (Marking) return;
 
         // Набор силы начинается, только когда касание подтвердилось выдержкой или
         // заметной протяжкой.

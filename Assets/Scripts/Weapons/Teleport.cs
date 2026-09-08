@@ -1,7 +1,8 @@
 using UnityEngine;
 
-/// Телепорт. Дистанцию задаёт набор силы, направление — прицел: одно и то же
-/// движение на клавиатуре, стике и пальце, отдельного режима выбора точки не нужно.
+/// Телепорт. У игрока точку задаёт крестик наводки — как в оригинале, где
+/// червя переносят курсором в любое место карты. Боту крестика не положено:
+/// ему дистанцию задаёт набор силы, а направление — прицел.
 /// Внутрь камня не пускает — ищет ближайший просвет над целью.
 public static class Teleport
 {
@@ -20,7 +21,17 @@ public static class Teleport
 
         Vector2 from = worm.transform.position;
         float range = Mathf.Lerp(MinRange, MaxRange, Mathf.Clamp01(charge));
-        Vector2 target = from + dir.normalized * range;
+        return JumpTo(worm, from + dir.normalized * range);
+    }
+
+    /// Переносит червя в отмеченную точку. Дальность не ограничена: крестик
+    /// ездит по всей карте, и прыжок на другой её конец — законный ход.
+    public static bool JumpTo(Worm worm, Vector2 target)
+    {
+        var terrain = GameManager.I != null ? GameManager.I.Terrain : null;
+        if (terrain == null) return false;
+
+        Vector2 from = worm.transform.position;
 
         target.x = Mathf.Clamp(target.x, 1.5f, DestructibleTerrain.WorldWidth - 1.5f);
         target.y = Mathf.Clamp(target.y, 0.5f, DestructibleTerrain.WorldHeight - 1.5f);

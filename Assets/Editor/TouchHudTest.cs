@@ -3,6 +3,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.LowLevel;
 using UnityEngine.UIElements;
 
 /// Проверяет видимое управление касаниями: слой `TouchPad` построен, кнопки
@@ -23,6 +24,9 @@ public static class TouchHudTest
     static bool _failed;
     static float _y0, _aim0;
     static int _shotFrame;
+
+    /// Наводка ракеты: где стоял крестик до жеста и куда мы ткнули пальцем.
+    static Vector2 _mark0, _tapWorld;
 
     static void Advance(int next) { _step = next; _mark = EditorApplication.timeSinceStartup - _start; }
     static void Fail(string msg) { Debug.LogError("TOUCH: " + msg); _failed = true; }
@@ -59,6 +63,29 @@ public static class TouchHudTest
     }
 
     static Worm Active => GameManager.I != null ? GameManager.I.ActiveWorm : null;
+
+    /// Настоящее касание виртуального тачскрина: кнопки HUD ходят мимо жестов,
+    /// а стик и тычок по карте живут именно в них — проверить их подделкой
+    /// нажатий на кнопки нельзя.
+    static void Finger(int id, Vector2 pos, UnityEngine.InputSystem.TouchPhase phase)
+    {
+        var ts = Touchscreen.current;
+        if (ts == null) return;
+        InputSystem.QueueStateEvent(ts, new TouchState
+        {
+            touchId = id,
+            position = pos,
+            phase = phase
+        });
+        InputSystem.Update();
+    }
+
+    /// Точка на экране в долях безопасной области.
+    static Vector2 SafePoint(float fx, float fy)
+    {
+        var safe = Screen.safeArea;
+        return new Vector2(safe.xMin + safe.width * fx, safe.yMin + safe.height * fy);
+    }
 
     static void Tick()
     {
@@ -105,12 +132,95 @@ public static class TouchHudTest
 
         if (_step == 3 && t - _mark > 0.6)
         {
-            Advance(4);
+            Advance(30);
             var w = Active;
             float d = w.AimAngle - _aim0;
             TouchInput.UiAim(0f);
             Debug.Log($"TOUCH step3: угол {_aim0:0.0} → {w.AimAngle:0.0} (Δ{d:0.0})");
             if (d < 5f) Fail("кнопка ▲ не подняла прицел");
+
+            // Дальше — наводка ракеты, и туда же уходят обе оси стика.
+            GameManager.I.SelectWeapon(Weapon.IndexOf(WeaponKind.Homing));
+        }
+
+        // Стик водит крестик обеими осями: кладём палец в кольцо и ведём его
+        // вверх-вправо. Радиус кольца — доля меньшей стороны, поэтому берём
+        // заведомо больше зоны покоя.
+        if (_step == 30 && t - _mark > 0.4)
+        {
+            Advance(31);
+            var w = Active;
+            if (w == null || !w.AwaitingTarget)
+            {
+                Fail("ракета не попросила отметить цель");
+                Advance(4);
+            }
+            else
+            {
+                _mark0 = w.MarkPoint;
+
+                // Палец сперва ложится в само кольцо и только потом едет: если
+                // первым же кадром показать его уже отклонённым, стик поднимется
+                // под палец и отклонения не увидит вовсе.
+                Finger(1, TouchInput.StickHome, UnityEngine.InputSystem.TouchPhase.Began);
+                Advance(305);
+            }
+        }
+
+        if (_step == 305 && t - _mark > 0.2)
+        {
+            Advance(31);
+            float r = Mathf.Min(Screen.safeArea.width, Screen.safeArea.height) * 0.12f;
+            Finger(1, TouchInput.StickHome + new Vector2(r, r),
+                   UnityEngine.InputSystem.TouchPhase.Moved);
+        }
+
+        if (_step == 31 && t - _mark > 0.5)
+        {
+            Advance(32);
+            var w = Active;
+            Vector2 d = w.MarkPoint - _mark0;
+            Debug.Log($"TOUCH step7: стик увёл крестик на {d.x:0.0};{d.y:0.0}");
+            if (d.x < 1f || d.y < 1f) Fail($"стик не водит крестик обеими осями: {d.x:0.0};{d.y:0.0}");
+
+            Finger(1, TouchInput.StickHome, UnityEngine.InputSystem.TouchPhase.Ended);
+
+            // Второй способ: тычок по карте. Берём точку подальше от стика и от
+            // плашки оружия, чтобы палец не перехватили ни кольцо, ни кнопки.
+            var tap = SafePoint(0.72f, 0.62f);
+            var cam = UnityEngine.Camera.main;
+            _tapWorld = cam.ScreenToWorldPoint(new Vector3(tap.x, tap.y, -cam.transform.position.z));
+            Finger(2, tap, UnityEngine.InputSystem.TouchPhase.Began);
+        }
+
+        if (_step == 32 && t - _mark > 0.4)
+        {
+            Advance(33);
+            var w = Active;
+            float miss = Vector2.Distance(w.MarkPoint, _tapWorld);
+            Debug.Log($"TOUCH step8: тычок в {_tapWorld.x:0.0};{_tapWorld.y:0.0}, " +
+                      $"крестик в {w.MarkPoint.x:0.0};{w.MarkPoint.y:0.0} (промах {miss:0.0})");
+            if (miss > 1.5f) Fail($"тычок по экрану не поставил крестик: {miss:0.0} юнита");
+
+            Finger(2, SafePoint(0.72f, 0.62f), UnityEngine.InputSystem.TouchPhase.Ended);
+            TouchInput.UiFire(true);
+        }
+
+        if (_step == 33 && t - _mark > 0.3)
+        {
+            Advance(34);
+            TouchInput.UiFire(false);
+        }
+
+        if (_step == 34 && t - _mark > 0.3)
+        {
+            Advance(4);
+            var w = Active;
+            Debug.Log($"TOUCH step9: цель отмечена={!w.AwaitingTarget}");
+            if (w.AwaitingTarget) Fail("кнопка ОГОНЬ не поставила метку");
+
+            // Дальше тест идёт прежним порядком, базукой.
+            GameManager.I.SelectWeapon(0);
         }
 
         if (_step == 4 && t - _mark > 0.4)
@@ -149,7 +259,7 @@ public static class TouchHudTest
 
         if (_step == 7 && t - _mark > 0.5) Finish();
 
-        if (t > 30) { Fail("тест не уложился в 30 секунд"); Finish(); }
+        if (t > 45) { Fail("тест не уложился в 45 секунд"); Finish(); }
     }
 
     /// Снимок самой панели HUD: она рисуется поверх экрана, камера её не видит,

@@ -72,6 +72,8 @@ public class App : MonoBehaviour
 
     // --- переходы --------------------------------------------------------
 
+    /// Каждая смена мира проявляется из черноты (фаза 13f): карта, задник и
+    /// HUD возникают разом, и без занавеса переход читается как сбой картинки.
     public void StartMatch(MatchConfig cfg)
     {
         TeardownMatch();
@@ -84,6 +86,7 @@ public class App : MonoBehaviour
         Phase = AppPhase.Match;
         SetPaused(false);
         _menu.HideAll();
+        _menu.FadeIn();
     }
 
     /// Конец игры — GameManager зовёт это из CheckGameOver.
@@ -111,6 +114,7 @@ public class App : MonoBehaviour
         Phase = AppPhase.Match;
         SetPaused(false);
         _menu.HideAll();
+        _menu.FadeIn();
     }
 
     /// «Новая карта» из паузы.
@@ -120,6 +124,7 @@ public class App : MonoBehaviour
         Match.Restart();
         SetPaused(false);
         _menu.HideAll();
+        _menu.FadeIn();
     }
 
     public void ReturnToMenu()
@@ -129,6 +134,7 @@ public class App : MonoBehaviour
         SetPaused(false);
         ConfigureCameraForMenu();
         _menu.ShowMain();
+        _menu.FadeIn();
     }
 
     public void TogglePause()

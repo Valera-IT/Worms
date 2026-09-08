@@ -18,8 +18,8 @@ public struct BotSkills
     public float ChargeJitter;  // разброс набора силы, доля
 
     // --- чем воюет ---
-    public bool Drops;          // динамит, мина, овца
-    public bool Strikes;        // налёт
+    public bool Drops;          // динамит, мина, овца и супер-овца
+    public bool Strikes;        // налёт и вся его родня: наковальня, напалм, мины, осёл
     public bool Homing;         // самонаводящаяся ракета
     public bool Teleport;       // перенос к цели
     public bool Rope;           // верёвка: качнуться на соседний остров

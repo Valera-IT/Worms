@@ -67,7 +67,7 @@ public class GameManager : MonoBehaviour
     int _dying;         // сколько червей сейчас прощаются: ход их дожидается
     bool _shooterHurt;  // стрелявшего задело его же выстрелом — отход отменяется
     float _waterTarget = float.NaN;   // куда ползёт вода; NaN — стоит на месте
-    Transform _water;   // квада воды: при потопе её приходится двигать
+    Water _water;       // тело, кромка и блики: при потопе всё это едет вверх
 
     void Awake()
     {
@@ -215,21 +215,16 @@ public class GameManager : MonoBehaviour
         // Раньше здесь была одна плоская заливка цветом Sky.
         Scenery.Build(WorldRoot, Terrain, seed);
 
-        // Квада воды есть всегда, даже в пещере: потоп зальёт и её,
-        // а пока уровень ниже нуля — квада просто выключена.
-        var water = Sprites.Make("Water", Sprites.Square, style.Water, 15, WorldRoot);
-        _water = water.transform;
-        LayoutWater();
+        // Вода есть всегда, даже в пещере: потоп зальёт и её, а пока уровень
+        // ниже нуля — она просто выключена.
+        _water = Water.Build(WorldRoot, style, seed);
     }
 
-    /// Ставит кваду так, чтобы её верхняя кромка совпала с уровнем воды.
+    /// Ставит воду на текущий уровень. Кромка едет и сама, каждый кадр, но
+    /// после шага потопа её двигаем сразу — иначе волна отстанет на кадр.
     void LayoutWater()
     {
-        if (_water == null) return;
-        float level = DestructibleTerrain.WaterLevel;
-        _water.gameObject.SetActive(level > 0f);
-        _water.position = new Vector3(DestructibleTerrain.WorldWidth * 0.5f, level * 0.5f - 20f, 0f);
-        _water.localScale = new Vector3(DestructibleTerrain.WorldWidth * 3f, level + 40f, 1f);
+        if (_water != null) _water.Layout();
     }
 
     /// Точки старта, блоками по командам: сначала все черви первой, потом второй.
@@ -439,9 +434,10 @@ public class GameManager : MonoBehaviour
         _shooterHurt = false;
 
         // Мину и динамит червь кладёт себе под ноги — смотреть на полёт нечего,
-        // и бежать надо прямо сейчас, пока горит фитиль.
+        // и бежать надо прямо сейчас, пока горит фитиль. Овца и супер-овца —
+        // другое дело: они уходят с места сами, и ход идёт за ними.
         var fired = CurrentWeapon;
-        if (fired.Use == WeaponUse.Drop && fired.Kind != WeaponKind.Sheep)
+        if (fired.Use == WeaponUse.Drop && !fired.Walker)
         {
             EnterRetreat(FuseRetreatTime);
             return;
@@ -467,6 +463,14 @@ public class GameManager : MonoBehaviour
     public void UnregisterProjectile(Projectile p)
     {
         _projectiles.Remove(p);
+
+        // Из хвоста списка выбрасываем уже уничтоженное. Взрыв рвёт соседние
+        // снаряды цепью — кассету, капли напалма, пачку бомб налёта, — и они
+        // уходят одним кадром: последним в списке вполне может лежать тот, чей
+        // GameObject уже разрушен, а камера потянулась бы к его transform.
+        while (_projectiles.Count > 0 && _projectiles[_projectiles.Count - 1] == null)
+            _projectiles.RemoveAt(_projectiles.Count - 1);
+
         if (_projectiles.Count > 0)
             Cam.Follow(_projectiles[_projectiles.Count - 1].transform, true);
         // Взорвался — камеру не уводим: Combat.Detonate задержал её на воронке.

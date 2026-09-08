@@ -48,13 +48,25 @@ public class DestructibleTerrain : MonoBehaviour
     bool[] _solid;
     bool[] _grass;   // трава ставится один раз при генерации: воронки остаются голыми
     bool[] _crust;   // светлая корка по всему контуру суши, тоже один раз
-    bool[] _scorch;  // опалённая кромка вокруг воронок
+    /// Копоть вокруг воронок: не признак, а плотность 0…255. Одним битом
+    /// она красила кромку сплошной чёрной каймой ровной ширины — кольцом
+    /// вокруг ямы, а не следом огня. Плотностью же копоть садится на землю
+    /// рваным пятном и сходит на нет к краю.
+    byte[] _scorch;
 
     // Украшения (деревья, кактусы, камни) не спрайты за ландшафтом, а его часть:
     // их пиксели впечатаны в маску и в цвет, поэтому дерево держит червя,
     // ловит снаряд и рвётся воронкой наравне с землёй — как в оригинале.
     Color32[] _decal;
     bool[] _hasDecal;
+
+    // Мост через пролив состоит из двух разных вещей. Настил — порода со своим
+    // цветом, но, в отличие от кроны дерева, это пол: по нему ходят, на нём
+    // стоят, и высота поверхности считается по нему. Канаты и стойки — только
+    // цвет: породы под ними нет, коллайдер их не видит, и червь проходит
+    // сквозь перила, а не спотыкается о них.
+    bool[] _deck;
+    bool[] _paint;
     Texture2D _tex;
     Color32[] _pixels;
     Color32[] _block;   // буфер под частичный SetPixels32, растёт по мере надобности
@@ -88,9 +100,11 @@ public class DestructibleTerrain : MonoBehaviour
         _solid = new bool[W * H];
         _grass = new bool[W * H];
         _crust = new bool[W * H];
-        _scorch = new bool[W * H];
+        _scorch = new byte[W * H];
         _decal = new Color32[W * H];
         _hasDecal = new bool[W * H];
+        _deck = new bool[W * H];
+        _paint = new bool[W * H];
         _pixels = new Color32[W * H];
         _block = new Color32[0];
 
@@ -98,6 +112,10 @@ public class DestructibleTerrain : MonoBehaviour
         _rockBelow = Mathf.RoundToInt(Style.RockBand * H);
         _rockWobble = Style.RockBand > 0.08f ? H * 0.10f : 0f;
         Generate(seed);
+
+        // Мосты — раньше украшений: дерево не должно вырасти посреди настила,
+        // а FlatSpot узнаёт о настиле как об обычной поверхности.
+        Bridges.Build(this, seed);
 
         // Украшения впечатываются после травы: они её перекрывают, а не наоборот.
         Scenery.StampDecor(this, seed);
@@ -261,6 +279,38 @@ public class DestructibleTerrain : MonoBehaviour
         }
     }
 
+    /// Доска настила: порода со своим цветом, по которой ходят. Зовётся из
+    /// Bridges на этапе генерации, до текстуры и коллайдеров, поэтому ничего
+    /// не перерисовывает — как и StampSprite.
+    public void StampDeck(int x, int y, Color32 c)
+    {
+        if (x < 0 || y < 0 || x >= W || y >= H) return;
+        int i = y * W + x;
+        _solid[i] = true;
+        _grass[i] = false;
+        _scorch[i] = 0;
+        _decal[i] = c;
+        _hasDecal[i] = true;
+        _deck[i] = true;
+    }
+
+    /// Канат: только цвет, без породы. Коллайдер его не видит, поэтому перила
+    /// и стойки не мешают ни ходьбе, ни прыжку — но взрыв их рвёт.
+    /// В породу не пишем: канат за ней всё равно не виден.
+    public void StampRope(int x, int y, Color32 c)
+    {
+        if (x < 0 || y < 0 || x >= W || y >= H) return;
+        int i = y * W + x;
+        if (_solid[i]) return;
+        _decal[i] = c;
+        _hasDecal[i] = true;
+        _paint[i] = true;
+    }
+
+    /// Настил ли это — для тестов и аудита мостов.
+    public bool IsDeckPixel(int x, int y)
+        => x >= 0 && y >= 0 && x < W && y < H && _deck[y * W + x];
+
     // ---------- преобразования координат ----------
 
     public Vector2 PixelToWorld(int px, int py) => new Vector2(px / (float)PixelsPerUnit, py / (float)PixelsPerUnit);
@@ -288,7 +338,9 @@ public class DestructibleTerrain : MonoBehaviour
             int i = y * W + x;
             // Крона и ствол — порода, но не земля: ходят и высаживаются по
             // грунту под ними, иначе червь стоял бы на верхушке дерева.
-            if (!_solid[i] || _hasDecal[i]) { gap++; continue; }
+            // Настил моста — исключение: он для того и положен, чтобы по нему
+            // шли, и червь (а с ним и бот, считающий дорогу) обязан его видеть.
+            if (!_solid[i] || (_hasDecal[i] && !_deck[i])) { gap++; continue; }
             if (gap >= MinHeadroom) return (y + 1) / (float)PixelsPerUnit;
             gap = 0;
         }
@@ -306,7 +358,7 @@ public class DestructibleTerrain : MonoBehaviour
         for (int y = H - 1; y >= 0; y--)
         {
             int i = y * W + x;
-            if (!_solid[i] || _hasDecal[i]) { gap++; continue; }
+            if (!_solid[i] || (_hasDecal[i] && !_deck[i])) { gap++; continue; }
             if (gap >= minGap) into.Add((y + 1) / (float)PixelsPerUnit);
             gap = 0;
         }
@@ -360,16 +412,21 @@ public class DestructibleTerrain : MonoBehaviour
         return points;
     }
 
-    /// Мешает ли украшение встать на грунт в точке wx: смотрим полосу над
-    /// землёй в два с половиной роста червя — ствол и низко висящая крона
-    /// мешают, а крона соседнего дерева в стороне уже нет. Проверять весь
-    /// столбец нельзя: под каждым деревом пропадала бы полоса шириной с крону.
-    public bool DecorBlocks(float wx, float groundY, float halfWidth = 0.7f)
+    /// Мешает ли украшение встать на грунт в точке wx: смотрим ровно тот
+    /// объём, который займёт червь, — полметра в стороны и два роста вверх.
+    /// Ствол в этом объёме мешает, крона выше — уже нет.
+    ///
+    /// Прежние 0,7 в стороны и 2,4 юнита вверх — это два с половиной роста и
+    /// шаг в каждую сторону: при нынешней густоте подлеска такая мерка
+    /// закрывала больше половины всех полок на карте. Верхний ярус пропадал
+    /// весь, каждой колонке доставалось не больше одной точки высадки, и
+    /// многоярусные карты снова раскладывали команды в линию по берегу.
+    public bool DecorBlocks(float wx, float groundY, float halfWidth = 0.55f)
     {
         int x0 = Mathf.Clamp(WorldToPixelX(wx - halfWidth), 0, W - 1);
         int x1 = Mathf.Clamp(WorldToPixelX(wx + halfWidth), 0, W - 1);
         int y0 = Mathf.Clamp(WorldToPixelY(groundY) - 2, 0, H - 1);
-        int y1 = Mathf.Clamp(WorldToPixelY(groundY + 2.4f), 0, H - 1);
+        int y1 = Mathf.Clamp(WorldToPixelY(groundY + 1.9f), 0, H - 1);
 
         for (int y = y0; y <= y1; y++)
             for (int x = x0; x <= x1; x++)
@@ -405,8 +462,12 @@ public class DestructibleTerrain : MonoBehaviour
         if (x0 > x1 || y0 > y1) return;
 
         int r2 = r * r;
-        int rim = r + Mathf.Max(2, r / 6);
+        // Копоть уходит заметно дальше воронки: у взрыва есть след, а не
+        // окантовка. Ширина считается от радиуса, но снизу подпёрта — у
+        // пулевых дырок кайма в один пиксель не читалась бы вовсе.
+        int rim = r + Mathf.Max(3, r / 3);
         int rim2 = rim * rim;
+        float band = Mathf.Max(1f, rim - r);
 
         // Копим точную границу изменённого — она обычно уже области сканирования.
         int dx0 = int.MaxValue, dy0 = int.MaxValue, dx1 = int.MinValue, dy1 = int.MinValue;
@@ -426,11 +487,25 @@ public class DestructibleTerrain : MonoBehaviour
                 bool touched = false;
                 if (d2 <= r2)
                 {
-                    if (_solid[i]) { _solid[i] = false; _grass[i] = false; _scorch[i] = false; touched = true; holePunched = true; }
+                    if (_solid[i]) { _solid[i] = false; _grass[i] = false; _scorch[i] = 0; _deck[i] = false; touched = true; holePunched = true; }
+                    // Канат породой не был — и коллайдер от него не меняется,
+                    // но взрыв его рвёт, иначе перила висят над пустотой.
+                    if (_paint[i]) { _paint[i] = false; _hasDecal[i] = false; touched = true; }
                 }
-                else if (_solid[i] && !_scorch[i])
+                else if (_solid[i])
                 {
-                    _scorch[i] = true;
+                    // Плотность падает от края ямы наружу, а шум рвёт кромку:
+                    // ровное кольцо выдавало бы циркуль. Слабую копоть поверх
+                    // сильной не кладём — иначе второй взрыв рядом осветлял бы
+                    // след первого.
+                    float t = (Mathf.Sqrt(d2) - r) / band;
+                    float n = Mathf.PerlinNoise(x * 0.16f + 3.1f, y * 0.16f + 8.7f);
+                    float f = (1f - t) * (0.55f + 0.95f * n);
+                    if (f <= 0.12f) continue;
+
+                    byte v = (byte)(Mathf.Min(1f, f) * 255f);
+                    if (v <= _scorch[i]) continue;
+                    _scorch[i] = v;
                     touched = true;
                 }
 
@@ -509,8 +584,9 @@ public class DestructibleTerrain : MonoBehaviour
 
                 _solid[i] = false;
                 _grass[i] = false;
-                _scorch[i] = false;
+                _scorch[i] = 0;
                 _hasDecal[i] = false;
+                _deck[i] = false;
 
                 if (x < dx0) dx0 = x;
                 if (x > dx1) dx1 = x;
@@ -565,7 +641,7 @@ public class DestructibleTerrain : MonoBehaviour
                 int i = row + x;
                 _solid[i] = true;
                 _grass[i] = false;
-                _scorch[i] = false;
+                _scorch[i] = 0;
                 _decal[i] = Mathf.Abs(across) > halfT - 1.2f ? edge : color;
                 _hasDecal[i] = true;
 
@@ -596,7 +672,9 @@ public class DestructibleTerrain : MonoBehaviour
             for (int x = x0; x <= x1; x++)
             {
                 int i = row + x;
-                if (!_solid[i]) { _pixels[i] = Empty; continue; }
+                // Канат моста — единственное, что рисуется в пустоте: породы
+                // под ним нет, поэтому и Shade его не касается.
+                if (!_solid[i]) { _pixels[i] = _paint[i] ? _decal[i] : Empty; continue; }
 
                 _pixels[i] = Shade(x, y, i);
             }
@@ -612,8 +690,23 @@ public class DestructibleTerrain : MonoBehaviour
     /// что была раньше, вблизи читалась как помехи телевизора.
     Color32 Shade(int x, int y, int i)
     {
-        if (_scorch[i]) return Style.Scorch;
+        var c = Ground(x, y, i);
+        byte soot = _scorch[i];
+        if (soot == 0) return c;
 
+        // Копоть не только красит в цвет гари, но и гасит яркость. Одного
+        // Style.Scorch мало: на острове он (58,42,30), а тёмный комок земли —
+        // (75,48,27), и полная копоть терялась бы в фактуре. Затемнение же
+        // выводит её из любой палитры, оставляя цвету стиля тон.
+        float k = soot / 255f;
+        var burnt = Color.Lerp(c, Style.Scorch, k) * Mathf.Lerp(1f, 0.55f, k);
+        burnt.a = 1f;   // умножение съело бы и альфу — порода стала бы прозрачной
+        return burnt;
+    }
+
+    /// Цвет породы без копоти: трава, корка, декали, комки земли и камня.
+    Color32 Ground(int x, int y, int i)
+    {
         // Ствол и крона — такая же порода, только со своим цветом.
         if (_hasDecal[i]) return _decal[i];
 

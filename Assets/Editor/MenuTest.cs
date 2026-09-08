@@ -3,8 +3,8 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 
 /// Гоняет стейт-машину App без человека: Меню → Матч → Пауза → Матч → Итоги → Меню.
-/// Проверяет, что мир поднимается и сносится в нужные моменты и что пауза
-/// останавливает время. Запуск: Unity -executeMethod MenuTest.Run
+/// Проверяет, что мир поднимается и сносится в нужные моменты, что пауза
+/// останавливает время и что смена мира идёт через затемнение (13f). Запуск: Unity -executeMethod MenuTest.Run
 public static class MenuTest
 {
     const string Flag = "MenuTest.Running";
@@ -98,12 +98,18 @@ public static class MenuTest
             cfg.TurnTime = 2f;           // чтобы матч добежал до конца быстро
             cfg.WormsPerTeam = 2;
             app.StartMatch(cfg);
+            // Смена мира проявляется из черноты (13f): сразу после StartMatch
+            // занавес обязан быть на экране, через полторы секунды — уйти.
+            var m = Object.FindAnyObjectByType<MenuUI>();
+            if (m == null || !m.Fading) Fail("переход в матч прошёл без затемнения");
             Advance(11);
         }
 
         if (_step == 11 && t - _mark > 1.5)
         {
             Advance(2);
+            var m2 = Object.FindAnyObjectByType<MenuUI>();
+            if (m2 != null && m2.Fading) Fail("затемнение не ушло за полторы секунды");
             var gm = GameManager.I;
             Debug.Log($"MENU step2: phase={app.Phase} worms={(gm != null ? gm.AllWorms().Count : -1)}");
             if (app.Phase != AppPhase.Match) Fail("StartMatch не перевёл в Match");
@@ -131,6 +137,26 @@ public static class MenuTest
             Debug.Log($"MENU step4: итоги, winner={(r != null ? r.WinnerTeam : -99)} title={r?.Title}");
             if (r == null || r.WinnerTeam != 0) Fail("победителем должна быть команда 0");
             if (GameManager.I == null) Fail("застывший мир должен ещё стоять фоном под итогами");
+            if (Hud.I != null) Fail("HUD на экране итогов должен быть снят");
+
+            app.Rematch();
+        }
+
+        // «Реванш» поднимает бой заново на том же объекте матча. Интерфейс
+        // при этом обязан вернуться целиком: без него матч идёт, но в нём
+        // ни кнопок, ни сетки оружия, ни экранного управления.
+        if (_step == 4 && t - _mark > 1.5)
+        {
+            Advance(41);
+            int docs = GameManager.I != null
+                     ? GameManager.I.GetComponents<UnityEngine.UIElements.UIDocument>().Length : -1;
+            int layers = Hud.I != null ? Hud.I.Layers : -1;
+            Debug.Log($"MENU step5: реванш phase={app.Phase} слоёв HUD {layers}, документов {docs}");
+
+            if (app.Phase != AppPhase.Match) Fail("реванш не вернул в матч");
+            if (Hud.I == null) Fail("после реванша HUD не создан");
+            else if (layers <= 0) Fail("после реванша интерфейс пуст: дерево не построилось");
+            if (docs != 1) Fail($"на объекте матча документов интерфейса {docs}, а должен быть один");
 
             app.ReturnToMenu();
         }
@@ -141,10 +167,10 @@ public static class MenuTest
             Finish();
         }
 
-        if (_step == 4 && t - _mark > 0.5)
+        if (_step == 41 && t - _mark > 0.5)
         {
             Advance(5);
-            Debug.Log($"MENU step5: назад в меню phase={app.Phase} gm={(GameManager.I != null)}");
+            Debug.Log($"MENU step6: назад в меню phase={app.Phase} gm={(GameManager.I != null)}");
             if (app.Phase != AppPhase.Menu) Fail("ReturnToMenu не вернул в меню");
             if (GameManager.I != null) Fail("мир не снесён при выходе в меню");
             app.StartMatch(MatchConfig.Hotseat());   // повторный вход — teardown не должен ломать пересборку
@@ -152,7 +178,7 @@ public static class MenuTest
 
         if (_step == 5 && t - _mark > 1.5)
         {
-            Debug.Log($"MENU step6: повторный матч phase={app.Phase} gm={(GameManager.I != null)}");
+            Debug.Log($"MENU step7: повторный матч phase={app.Phase} gm={(GameManager.I != null)}");
             if (app.Phase != AppPhase.Match || GameManager.I == null) Fail("повторный StartMatch не поднял мир");
             Debug.Log(_failed ? "MENU: ПРОВАЛ" : "MENU: OK");
             Finish();

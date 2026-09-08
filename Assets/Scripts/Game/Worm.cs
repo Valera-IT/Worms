@@ -48,6 +48,11 @@ public class Worm : MonoBehaviour
     const float GirderThickness = 0.55f;
     const float GirderReach = 3.2f;
 
+    /// Сколько секунд после отброса червя не трогает трение покоя. Больше
+    /// брать нельзя: толчок задуман как сдвиг на рост червя, а не как полёт
+    /// через полкарты.
+    const float SlideGrace = 0.2f;
+
     /// Сколько секунд полоса силы идёт от нуля до полного заряда.
     const float ChargeTime = 1.15f;
 
@@ -64,8 +69,13 @@ public class Worm : MonoBehaviour
     Transform _art;               // тело и черты вместе — их и разворачиваем по Facing
     SpriteRenderer _body;
     SpriteRenderer _face;
+    WormAnimator _anim;           // позы: только картинка, физики не касается
+    SpriteRenderer _gun;          // ствол в руках: аниматор возит его по дуге прицела
+    bool _aiming;                 // червь сейчас держит оружие и целится
     Transform _crosshair;
     SpriteRenderer _crossSr;
+    Transform _mark;              // метка цели самонаводящейся ракеты
+    SpriteRenderer _markSr;
 
     float _charge;
     bool _charging;
@@ -75,18 +85,35 @@ public class Worm : MonoBehaviour
     float _pushTime;              // сколько червь подряд толкается вбок, для захода на склон
     float _stepTimer;
     float _drownTimer;            // сколько червь уже под водой: тонет не мгновенно
+    float _slide;                 // сколько ещё лететь без трения покоя после толчка
     float _restTime;              // сколько червь стоит без дела — после чего примерзает
     float _fallPeak = float.NaN;  // высшая точка текущего полёта; NaN — падение не считаем
     bool _frozen;                 // покой: тело зажато связями, толкнуть его нельзя
+    bool _onGround;               // опора этого кадра: считаем один раз за Update
     bool _chute;                  // парашют раскрыт
     bool _jet;                    // ранец включён
     float _fuel;                  // остаток тяги ранца в секундах
+    bool _jetAloft;               // ранец уже оторвал червя от земли
     Transform _canopy;            // купол парашюта
     Transform _flame;             // выхлоп ранца
     bool _acted;                  // червь уже походил: сменить его на другого нельзя
     float _bubbleTimer;
     int _lastWeapon = -1;
+
+    /// Отмеченная цель самонаводящейся ракеты и признак того, что её уже
+    /// подтвердили. Живёт от отметки до выстрела: сменил оружие — метка снята.
+    Vector2 _aimPoint;
+    bool _aimPointSet;
+    bool _markLive;               // крестик уже поставлен на карту и живёт
+    bool _markCam;                // камера сейчас смотрит на крестик, а не на червя
+    bool _markFrozen;             // крестик ведут пальцем, и камера стоит
+
+    /// Скорость, с которой стрелки и стик водят крестик по карте, юнитов в
+    /// секунду. Карта шириной под сотню юнитов проезжается секунд за пять —
+    /// быстрее крестик становится неуправляемым, медленнее выматывает.
+    const float MarkSpeed = 18f;
     Rope _rope;
+    PowerMeter _power;            // полоса силы вдоль прицела
     int _gen;
 
     public bool IsActive => GameManager.I != null && GameManager.I.ActiveWorm == this;
@@ -95,7 +122,38 @@ public class Worm : MonoBehaviour
     /// выстрелил, толкнул соседа или бросил верёвку. До этого мига ход можно
     /// передать другому червю команды (GameManager.SelectNextWorm), после — нет.
     public bool HasActed => _acted || _hasFiredThisTurn;
+
+    /// Червь сейчас ставит крестик: ход и прицел на это время отданы метке,
+    /// как в оригинале на Сеге. Крестика просят ракета, налёт и телепорт —
+    /// всё, у чего наведение задаётся точкой на карте (Weapon.Targeted).
+    bool Marking => !IsBot && !_hasFiredThisTurn && !Roped && !_aimPointSet
+                 && GameManager.I != null && GameManager.I.CurrentWeapon != null
+                 && GameManager.I.CurrentWeapon.Targeted;
+
+    /// То же для интерфейса: подсказать, что нажатие сейчас отметит цель,
+    /// а не начнёт набор силы.
+    public bool AwaitingTarget => IsActive && !IsDead && Marking;
+
+    /// Где стоит крестик наводки и живёт ли он вообще. Нужно тесту касаний:
+    /// иначе не увидеть, что стик и палец действительно его возят.
+    public Vector2 MarkPoint => _aimPoint;
+    public bool MarkLive => _markLive;
     public Vector2 Velocity => _rb != null ? _rb.linearVelocity : Vector2.zero;
+
+    /// Опора, посчитанная в этом кадре. Grounded стреляет лучом, и звать его
+    /// второй раз ради картинки — лишний CircleCast на каждого червя в кадре.
+    public bool OnGround => _onGround;
+
+    /// Червь примёрз в покое: из движения ему разрешено только дыхание.
+    public bool Frozen => _frozen;
+
+    /// Червь держит оружие и целится: его ход, он ещё не стрелял и не висит на
+    /// верёвке. Тем же признаком включается прицел на экране — иначе корпус
+    /// вёл бы за стволом, которого игроку не показывают.
+    public bool Aiming => _aiming;
+
+    /// Тем же порогом, что и Drowning: у самой кромки червь ещё не тонет.
+    public bool Underwater => transform.position.y < DestructibleTerrain.WaterLevel - 0.1f;
     public float Charge => _charge;
     public bool IsCharging => _charging;
 
@@ -127,6 +185,13 @@ public class Worm : MonoBehaviour
         w._body = Sprites.Make("Body", WormSprite.Body, team.Color, 10, art);
         w._face = Sprites.Make("Face", WormSprite.Face, Color.white, 11, art);
 
+        // Ствол лежит на том же «Art», что тело и лицо: разворот по Facing
+        // достаётся ему даром, зеркалится вся ветка целиком.
+        var gun = Sprites.Make("Gun", null, Color.white, 12, art);
+        gun.enabled = false;
+        w._gun = gun;
+        w._anim = WormAnimator.Attach(w, w._body, w._face, gun);
+
         var col = go.AddComponent<CircleCollider2D>();
         col.radius = 0.5f;
         col.sharedMaterial = new PhysicsMaterial2D("WormMat") { friction = 0.35f, bounciness = 0f };
@@ -139,22 +204,36 @@ public class Worm : MonoBehaviour
         w._rb = rb;
 
         // Купол и выхлоп висят выключенными: включаются на время полёта.
-        var canopy = Sprites.Make("Canopy", Sprites.Square, new Color(0.95f, 0.96f, 1f, 0.95f), 9, go.transform);
+        // Оба — нарисованные кадры, а не растянутый квадрат с кругом: купол
+        // хлопает тканью, пламя треплется.
+        var canopy = Sprites.Make("Canopy", GearSprite.Canopy[0], Color.white, 9, go.transform);
         canopy.transform.localPosition = new Vector3(0f, 1.15f, 0f);
-        canopy.transform.localScale = new Vector3(2.1f, 0.42f, 1f);
         canopy.gameObject.SetActive(false);
+        Flipbook.Attach(canopy, GearSprite.Canopy, 9f);
         w._canopy = canopy.transform;
 
-        var flame = Sprites.Make("Jet", Sprites.Circle, new Color(1f, 0.72f, 0.25f, 0.95f), 9, go.transform);
-        flame.transform.localPosition = new Vector3(0f, -0.55f, 0f);
-        flame.transform.localScale = new Vector3(0.45f, 0.7f, 1f);
+        var flame = Sprites.Make("Jet", GearSprite.Flame[0], Color.white, 9, go.transform);
+        flame.transform.localPosition = new Vector3(0f, -0.62f, 0f);
         flame.gameObject.SetActive(false);
+        Flipbook.Attach(flame, GearSprite.Flame, 18f);
         w._flame = flame.transform;
 
-        var cross = Sprites.Make("Crosshair", Sprites.Circle, new Color(1f, 1f, 1f, 0.85f), 12, go.transform);
-        cross.transform.localScale = Vector3.one * 0.3f;
+        // Прицел направления — кольцо с перекрестием, как в оригинале. Размер
+        // задаёт сам спрайт: белая точка, которую он заменил, читалась мусором.
+        var cross = Sprites.Make("Crosshair", WeaponIcons.Sight, new Color(1f, 1f, 1f, 0.92f), 12, go.transform);
         w._crosshair = cross.transform;
         w._crossSr = cross;
+
+        // Метка цели ракеты — жёлтый крестик, как на Сеге. Висит на черве
+        // только как на владельце: место ей задаётся мировой точкой, а не
+        // смещением от тела.
+        var mark = Sprites.Make("TargetMark", WeaponIcons.CrossMark, Color.white, 12, go.transform);
+        mark.gameObject.SetActive(false);
+        w._mark = mark.transform;
+        w._markSr = mark;
+
+        // Полоса силы: живёт на карте у самого червя, а не в углу экрана.
+        w._power = PowerMeter.Attach(go.transform);
 
         return w;
     }
@@ -169,6 +248,8 @@ public class Worm : MonoBehaviour
         _burstLeft = 0;
         _charge = 0f;
         _charging = false;
+        _aimPointSet = false;
+        _markLive = false;
         _lastWeapon = GameManager.I != null ? GameManager.I.SelectedWeapon : -1;
         ReleaseRope();
     }
@@ -265,6 +346,9 @@ public class Worm : MonoBehaviour
         float move = steering && Controls != null ? Controls.Move : 0f;
         if (Mathf.Abs(move) > 0.01f) { Wake(); return; }
 
+        // Фора после отброса: пока она идёт, червя не тормозим и не морозим.
+        if (_slide > 0f) { _slide -= Time.deltaTime; _restTime = 0f; return; }
+
         // Трение покоя: остаток скорости гасим сами, а не ждём, пока круглый
         // коллайдер остановится о неровности.
         var v = _rb.linearVelocity;
@@ -346,11 +430,24 @@ public class Worm : MonoBehaviour
         // Прицел в отходе убираем: он обещал бы выстрел, которого не будет.
         _crossSr.enabled = active && !_hasFiredThisTurn;
 
+        // Тот же признак ведёт корпус и ствол: целится червь ровно тогда,
+        // когда ему показывают прицел.
+        _aiming = _crossSr.enabled && !Roped;
+        if (_anim != null)
+        {
+            var held = _aiming ? GameManager.I.CurrentWeapon : null;
+            _anim.Hold(HeldSprite(held), held != null ? WeaponIcons.Lean(held.Kind) : float.NaN);
+        }
+
         if (active) HandleInput();
 
         // Прицел рисуем всегда для активного червя.
         var dir = AimDirection;
-        _crosshair.localPosition = dir * 2.2f;
+        _crosshair.localPosition = dir * 2.6f;
+        // Полоса силы растёт из ствола по тому же направлению. Заряд без набора
+        // равен нулю, так что отдельного признака «спрятать» ей не нужно.
+        _power.Show(_charging ? _charge : -1f, dir);
+        TargetMark(active);
         // Червь смотрит туда же, куда целится: зеркалим весь спрайт целиком.
         _art.localScale = new Vector3(Facing, 1f, 1f);
 
@@ -366,10 +463,51 @@ public class Worm : MonoBehaviour
         JetTick(flyInput, flyInput != null ? Mathf.Clamp(flyInput.Move, -1f, 1f) : 0f);
 
         bool onGround = Grounded;
+        _onGround = onGround;
         if (!onGround) _airTime += Time.deltaTime; else _airTime = 0f;
         Falling(onGround);
 
         Steps(active);
+    }
+
+    /// Что червь держит в руках. Верёвка, телепорт, купол и ранец ствола не
+    /// дают: верёвка летит из рук сама, а остальное надето, а не наведено.
+    static Sprite HeldSprite(Weapon w)
+    {
+        if (w == null) return null;
+        switch (w.Use)
+        {
+            case WeaponUse.Rope:
+            case WeaponUse.Teleport:
+            case WeaponUse.Chute:
+            case WeaponUse.Jet:
+                return null;
+            default:
+                return WeaponIcons.Sprite(w.Kind);
+        }
+    }
+
+    /// Метка цели ракеты. Пока цель не подтверждена — мигает и ездит по карте
+    /// за стрелками; после подтверждения стоит ровно и ждёт выстрела.
+    void TargetMark(bool active)
+    {
+        var gm = GameManager.I;
+        bool want = active && !_hasFiredThisTurn && !IsBot
+                 && gm != null && gm.CurrentWeapon != null && gm.CurrentWeapon.Targeted;
+
+        // Крестика ещё нет вовсе, пока наводка не началась: до первого кадра
+        // MarkInput точки у него нет, и он висел бы в нуле карты.
+        bool show = want && _markLive;
+        if (_mark.gameObject.activeSelf != show) _mark.gameObject.SetActive(show);
+
+        if (!want && _markLive) { _markLive = false; ReturnCamera(); }
+        if (!show) return;
+
+        _mark.position = _aimPoint;
+
+        var c = _markSr.color;
+        c.a = _aimPointSet ? 0.95f : (Mathf.Repeat(Time.time, 0.5f) < 0.25f ? 0.85f : 0.3f);
+        _markSr.color = c;
     }
 
     /// Шаги слышны только у того червя, кем ходят: шорох чужого тела,
@@ -443,17 +581,29 @@ public class Worm : MonoBehaviour
         var input = Controls;
         if (input == null) return;
 
-        float h = Mathf.Clamp(input.Move, -1f, 1f);
-        if (Mathf.Abs(h) > 0.01f) Facing = h > 0 ? 1 : -1;
+        // Пока ракета ждёт крестика, те же оси водят метку, а не червя: он
+        // стоит на месте, никуда не шагает и окно выбора червя не закрывает —
+        // отменить наводку сменой оружия можно, шаг отменить нельзя.
+        bool marking = Marking;
 
-        // Первое же осмысленное действие закрывает окно выбора червя: шаг,
-        // прыжок и выстрел уже нельзя отыграть назад, а прицел — можно.
-        if (Mathf.Abs(h) > 0.01f || input.JumpPressed) _acted = true;
+        float h = Mathf.Clamp(input.Move, -1f, 1f);
+        if (!marking)
+        {
+            if (Mathf.Abs(h) > 0.01f) Facing = h > 0 ? 1 : -1;
+
+            // Первое же осмысленное действие закрывает окно выбора червя: шаг,
+            // прыжок и выстрел уже нельзя отыграть назад, а прицел — можно.
+            if (Mathf.Abs(h) > 0.01f || input.JumpPressed) _acted = true;
+        }
 
         bool roped = Roped;
         bool grounded = !roped && Grounded;
 
-        if (roped)
+        if (marking)
+        {
+            MarkInput(input);
+        }
+        else if (roped)
         {
             // На весу ввод уходит верёвке целиком: вбок — раскачка, вверх-вниз —
             // длина, прыжок — отцеп. Прицел там же не покрутить, и это честно:
@@ -504,6 +654,12 @@ public class Worm : MonoBehaviour
         }
 
 
+        // Ранец забирает кнопку «Огонь» себе на всё время полёта. Раньше он
+        // тратил патрон сразу, выбор уезжал на базуку — и второе нажатие,
+        // которым игрок добавлял тяги, уходило в набор силы и выстрел под ноги.
+        // Заодно на лету не переключить оружие: в полёте выбирать нечего.
+        if (_jet) return;
+
         // Пока дробовик не отстрелял очередь, оружие не переключить: оба выстрела
         // уходят из одного ствола.
         if (_burstLeft == 0)
@@ -519,11 +675,46 @@ public class Worm : MonoBehaviour
             _lastWeapon = GameManager.I.SelectedWeapon;
             _charging = false;
             _charge = 0f;
+            _aimPointSet = false;
+            _markLive = false;
+            ReturnCamera();
         }
 
         if (_hasFiredThisTurn) return;
 
         var weapon = GameManager.I.CurrentWeapon;
+
+        // Ракета, налёт и телепорт сначала просят отметить точку на карте и
+        // только потом делают дело — как в оригинале. Отметка не тратит патрон
+        // и не заканчивает ход: пока цель не подтверждена, ни полоса силы, ни
+        // сам выстрел не заводятся. Проверка стоит до разбора Use, иначе
+        // нажатие на «Огонь» уходило бы налёту мимо крестика.
+        if (weapon.Targeted && !_aimPointSet)
+        {
+            // Бот метит цель тем же полем, что и стреляет: точку налёта и
+            // прыжка ему считает BotPlanner, и приносит она её готовой —
+            // крестик боту водить нечем и незачем, а подтверждение стоило бы
+            // ему целого хода. Ракете точки в плане может и не быть (выстрел
+            // наугад, план из памяти) — там выручает HomingTarget, тот самый
+            // ближайший враг, которого выберет и модель полёта.
+            // Нажатие бота не трогаем — оно уйдёт по своему пути этим же кадром.
+            if (IsBot)
+            {
+                if (input.HasMark) { _aimPoint = input.Mark; _aimPointSet = true; }
+                else if (weapon.Homing) { _aimPoint = HomingTarget(AimDirection); _aimPointSet = true; }
+            }
+            else
+            {
+                // Метку ставим на отпускании, а не на нажатии: пальцем крестик
+                // водят, не отрывая руки от экрана, и нажатие приходит в самом
+                // начале протяжки.
+                if (input.FireReleased) ConfirmMark();
+
+                // Живой игрок в этом кадре больше ничего не делает: одно
+                // нажатие — одно действие.
+                return;
+            }
+        }
 
         switch (weapon.Use)
         {
@@ -585,7 +776,10 @@ public class Worm : MonoBehaviour
             {
                 // Полоса едва тронулась — это не выстрел, а сорвавшийся палец.
                 // Прежде такой промах уходил снарядом под ноги и стоил хода.
-                if (_charge < MinCharge) { _charging = false; _charge = 0f; return; }
+                // Телепорт не в счёт: у него полоса — это дальность прыжка, и
+                // короткий прыжок в двух шагах — законное действие.
+                if (_charge < MinCharge && weapon.Use != WeaponUse.Teleport)
+                { _charging = false; _charge = 0f; return; }
 
                 // Телепорт использует ту же полосу силы, только не как скорость снаряда,
                 // а как дальность прыжка — отдельного режима выбора точки не нужно.
@@ -611,11 +805,19 @@ public class Worm : MonoBehaviour
     {
         _charging = false;
 
-        if (!Teleport.Jump(this, AimDirection, _charge))
+        // Игрок отметил точку крестиком — прыгаем ровно в неё, без дальности и
+        // угла. Набор силы остаётся ботом: у него крестика нет, и дистанцию он
+        // задаёт полосой (BotInput.TryTeleport).
+        bool jumped = _aimPointSet ? Teleport.JumpTo(this, _aimPoint)
+                                   : Teleport.Jump(this, AimDirection, _charge);
+        if (!jumped)
         {
-            // Точки не нашлось — патрон цел, ход продолжается.
+            // Точки не нашлось — патрон цел, ход продолжается. Метку снимаем:
+            // крестик заведётся заново, и место выбирают другое.
             Fx.FloatingText(transform.position + Vector3.up * 0.8f, "некуда", new Color(1f, 0.8f, 0.4f));
             _charge = 0f;
+            _aimPointSet = false;
+            _markLive = false;
             return;
         }
 
@@ -653,15 +855,123 @@ public class Worm : MonoBehaviour
         float speed = w.LaunchSpeed * Mathf.Max(0.18f, _charge);
 
         var shot = Projectile.Spawn(w, pos, dir * speed, this, 1f, w.Cluster);
-        if (w.Homing) shot.HomeTarget = HomingTarget(dir);
+        // Метка игрока главнее: она и есть наведение. HomingTarget остаётся
+        // за ботом и страховкой на случай выстрела без отметки.
+        if (w.Homing) shot.HomeTarget = _aimPointSet ? _aimPoint : HomingTarget(dir);
         Sfx.Shot();
 
         _rb.AddForce(-dir * 1.2f, ForceMode2D.Impulse);
+        if (_anim != null) _anim.Recoil();
         GameManager.I.OnWeaponFired();
         _charge = 0f;
     }
 
-    /// Ближайший живой враг в стороне прицела: туда пойдёт самонаводящаяся ракета.
+    /// Ведёт ли червя бот. У живого игрока Team.Controller пуст, и ввод берётся
+    /// из роутера клавиатуры, геймпада и касаний.
+    bool IsBot => Team != null && Team.Controller != null;
+
+    /// Крестик наводки. Палец и мышь ставят его прямо в точку, стрелки и стик
+    /// водят по карте — на Сеге это и была вся наводка: крестик ездит, камера
+    /// едет за ним, кнопка ставит метку.
+    void MarkInput(IGameInput input)
+    {
+        if (!_markLive)
+        {
+            // Появляется не под ногами, а там, куда червь смотрит: чаще всего
+            // цель именно в той стороне, и ехать до неё уже не надо.
+            _aimPoint = (Vector2)transform.position + AimDirection * 9f;
+            _markLive = true;
+            _markCam = true;
+
+            // Нарочно «ведут пальцем»: со следующей строки признак разойдётся
+            // с настоящим вводом, и камера станет на крестик тем же путём, что
+            // и при всякой другой смене способа наводки.
+            _markFrozen = true;
+        }
+
+        // Палец и мышь кладут крестик прямо в точку, стик и стрелки водят его
+        // по карте. Разница не только в удобстве: пока крестик ведут пальцем,
+        // камеру двигать нельзя. Она поехала бы к крестику, мир под неподвижным
+        // пальцем уехал бы в другую сторону, и точка под тем же пальцем
+        // оказалась бы дальше прежней — крестик убегал бы сам от себя.
+        bool pointed = input.HasAimTarget;
+        if (pointed) _aimPoint = input.AimTarget;
+        else
+        {
+            var d = new Vector2(Mathf.Clamp(input.Move, -1f, 1f),
+                                Mathf.Clamp(input.AimAxis, -1f, 1f));
+            if (d.sqrMagnitude > 1f) d.Normalize();
+            _aimPoint += d * MarkSpeed * Time.deltaTime;
+        }
+
+        if (pointed != _markFrozen)
+        {
+            _markFrozen = pointed;
+            var cam = GameManager.I != null ? GameManager.I.Cam : null;
+            if (cam != null) cam.Follow(pointed ? null : _mark, true);
+        }
+
+        _aimPoint.x = Mathf.Clamp(_aimPoint.x, 0f, DestructibleTerrain.WorldWidth);
+        _aimPoint.y = Mathf.Clamp(_aimPoint.y, DestructibleTerrain.WaterLevel,
+                                  DestructibleTerrain.WorldHeight);
+
+        // Червь разворачивается в сторону метки: стрелять он будет туда.
+        float dx = _aimPoint.x - transform.position.x;
+        if (Mathf.Abs(dx) > 0.5f) Facing = dx > 0f ? 1 : -1;
+    }
+
+    /// Цель отмечена: крестик замирает, камера возвращается к червю, и дальше
+    /// ход идёт обычным порядком — прицел, полоса силы, выстрел. Налёту и
+    /// телепорту стрелять нечем: у них точка и есть всё наведение, поэтому
+    /// они срабатывают прямо на подтверждении, как в оригинале.
+    void ConfirmMark()
+    {
+        _aimPointSet = true;
+        Sfx.Pickup();
+        Fx.Splash(_aimPoint, new Color(1f, 0.66f, 0.16f), 6, 0.2f);
+        ReturnCamera();
+
+        var w = GameManager.I != null ? GameManager.I.CurrentWeapon : null;
+        if (w == null) return;
+        if (w.Use == WeaponUse.Strike) CallAirStrike(w);
+        else if (w.Use == WeaponUse.Teleport) DoTeleport(w);
+    }
+
+    /// Вернуть камеру червю после наводки. Зовётся и при отказе от неё: сменил
+    /// оружие посреди наводки — крестик больше не нужен.
+    void ReturnCamera()
+    {
+        if (!_markCam) return;
+        _markCam = false;
+        _markFrozen = false;
+
+        // Ход кончился прямо посреди наводки — камерой распоряжается уже
+        // следующий червь, и дёргать её назад к этому нельзя.
+        if (!IsActive) return;
+
+        if (GameManager.I != null && GameManager.I.Cam != null)
+            GameManager.I.Cam.Follow(transform, true);
+    }
+
+    /// Первая точка породы или червя на луче прицела. Не попали ни во что —
+    /// точка в fallback юнитах по тому же лучу.
+    Vector2 AimRayPoint(Vector2 dir, float range, float fallback)
+    {
+        Vector2 origin = (Vector2)transform.position + dir * 0.95f;
+
+        var hits = Physics2D.RaycastAll(origin, dir, range);
+        float best = float.MaxValue;
+        Vector2 point = origin + dir * fallback;
+        foreach (var hit in hits)
+        {
+            if (hit.collider.gameObject == gameObject) continue;
+            if (hit.distance < best) { best = hit.distance; point = hit.point; }
+        }
+        return point;
+    }
+
+    /// Ближайший живой враг в стороне прицела: туда пойдёт ракета бота и та,
+    /// что почему-то ушла без отметки.
     /// Цель выбирается на выстреле, а не каждый кадр — иначе ракета переключалась
     /// бы между червями и вертелась на месте.
     Vector2 HomingTarget(Vector2 dir)
@@ -689,6 +999,7 @@ public class Worm : MonoBehaviour
     /// только после последнего. Каждая пуля делает свою маленькую воронку.
     void FireHitscan(Weapon w)
     {
+        if (_anim != null) _anim.Recoil();
         if (w.AutoBurst)
         {
             _hasFiredThisTurn = true;
@@ -759,6 +1070,7 @@ public class Worm : MonoBehaviour
     void Strike(Weapon w)
     {
         _hasFiredThisTurn = true;
+        if (_anim != null) _anim.Swing();
         bool punch = w.Kind == WeaponKind.FirePunch;
 
         Vector2 origin = (Vector2)transform.position + new Vector2(Facing * 0.9f, 0.1f);
@@ -793,6 +1105,7 @@ public class Worm : MonoBehaviour
     public Worm Prod(Weapon w)
     {
         _acted = true;
+        if (_anim != null) _anim.Swing();
 
         Vector2 origin = (Vector2)transform.position + new Vector2(Facing * 0.6f, 0f);
         var worms = GameManager.I.AllWorms();
@@ -878,16 +1191,25 @@ public class Worm : MonoBehaviour
     }
 
     /// Ранец: топливо тратится, только пока держат кнопку, поэтому им можно
-    /// подпрыгнуть трижды по секунде, а не один раз на всё. Ход не заканчивает.
+    /// подпрыгнуть трижды по секунде, а не один раз на всё. Снимается он не
+    /// отпусканием кнопки, а посадкой или пустым баком — отпустил в воздухе и
+    /// летишь дальше по инерции, нажал снова и добавил тяги. Ход не заканчивает.
     public void StartJet(Weapon w)
     {
         if (_jet) return;
 
         _acted = true;
         _jet = true;
+        _jetAloft = false;
         _fuel = Mathf.Max(0.5f, w.Fuel);
+        _charging = false;
+        _charge = 0f;
         Wake();
         GameManager.I.ConsumeAmmo(w.Kind);
+        // Патрон у ранца последний, и ConsumeAmmo сам уводит выбор на базуку.
+        // Запоминаем это переключение сразу: иначе HandleInput обнаружит его
+        // задним числом уже в полёте и примет за смену оружия игроком.
+        _lastWeapon = GameManager.I.SelectedWeapon;
         Fx.FloatingText(transform.position + Vector3.up * 0.8f, "ранец", w.Color);
     }
 
@@ -900,6 +1222,12 @@ public class Worm : MonoBehaviour
             StopJet();
             return;
         }
+
+        // Ранец живёт до посадки или до сухого бака, а не до отпускания кнопки:
+        // отпустил — просто перестал давать тягу и падаешь дальше в ранце.
+        // Взлёт с земли этим не сорвать: пока червь не оторвался, посадки нет.
+        if (!Grounded) _jetAloft = true;
+        else if (_jetAloft && _rb.linearVelocity.y > -0.5f) { StopJet(); return; }
 
         bool thrust = input != null && input.FireHeld;
         if (_flame != null) _flame.gameObject.SetActive(thrust);
@@ -919,6 +1247,7 @@ public class Worm : MonoBehaviour
     public void StopJet()
     {
         _jet = false;
+        _jetAloft = false;
         _fuel = 0f;
         if (_flame != null) _flame.gameObject.SetActive(false);
     }
@@ -932,6 +1261,7 @@ public class Worm : MonoBehaviour
     void Excavate(Weapon w)
     {
         _hasFiredThisTurn = true;
+        if (_anim != null) _anim.Digs();
 
         var terrain = GameManager.I.Terrain;
         Vector2 origin = transform.position;
@@ -1007,6 +1337,7 @@ public class Worm : MonoBehaviour
     /// хода, поэтому ходом её не ждут — остальное тикает как обычный снаряд.
     void DropItem(Weapon w)
     {
+        if (_anim != null) _anim.Swing();
         _hasFiredThisTurn = true;
 
         Vector2 pos = (Vector2)transform.position + new Vector2(Facing * 0.6f, 0f);
@@ -1024,23 +1355,15 @@ public class Worm : MonoBehaviour
         GameManager.I.OnWeaponFired();
     }
 
-    /// Налёт: пятёрка бомб сыплется на точку, куда смотрит прицел. Точка ищется
-    /// лучом до породы — так она одинаково задаётся и мышью, и стрелками.
+    /// Налёт: пятёрка бомб сыплется на отмеченную крестиком точку — как в
+    /// оригинале, где налёт наводят курсором по всей карте. Метки нет (бот) —
+    /// точку ищем лучом прицела до породы.
     void CallAirStrike(Weapon w)
     {
+        if (_anim != null) _anim.Recoil();
         _hasFiredThisTurn = true;
 
-        Vector2 dir = AimDirection;
-        Vector2 origin = (Vector2)transform.position + dir * 0.95f;
-        float x = origin.x + dir.x * 18f;
-
-        var hits = Physics2D.RaycastAll(origin, dir, 60f);
-        float best = float.MaxValue;
-        foreach (var hit in hits)
-        {
-            if (hit.collider.gameObject == gameObject) continue;
-            if (hit.distance < best) { best = hit.distance; x = hit.point.x; }
-        }
+        float x = _aimPointSet ? _aimPoint.x : AimRayPoint(AimDirection, 60f, 18f).x;
 
         float top = DestructibleTerrain.WorldHeight + 6f;
         for (int i = 0; i < Mathf.Max(1, w.Burst); i++)
@@ -1059,6 +1382,12 @@ public class Worm : MonoBehaviour
         if (IsDead) return;
         _charging = false;
         Wake();
+        // Трение покоя в Settle гасит горизонтальную скорость за четверть
+        // секунды. Для червя, который просто съезжает по склону, это и нужно,
+        // а вот отброшенного оно съедало на месте: под низким сводом пещеры
+        // толчок сдвигал соседа на треть юнита вместо полутора. Даём полёту
+        // короткую фору — на ней же летят и те, кого достал взрыв.
+        _slide = SlideGrace;
         _rb.AddForce(impulse, ForceMode2D.Impulse);
     }
 
@@ -1068,6 +1397,7 @@ public class Worm : MonoBehaviour
         Health -= dmg;
         if (GameManager.I != null) GameManager.I.RegisterDamage(this, dmg);
         Fx.FloatingText(transform.position + Vector3.up * 0.8f, "-" + Mathf.RoundToInt(dmg), new Color(1f, 0.5f, 0.4f));
+        if (_anim != null) _anim.Flinch();
         if (Health <= 0f) Die();
     }
 
@@ -1098,8 +1428,10 @@ public class Worm : MonoBehaviour
 
         ReleaseRope();
         _crossSr.enabled = false;
+        _mark.gameObject.SetActive(false);
         _col.enabled = false;
         _rb.simulated = false;
+        if (_gun != null) _gun.enabled = false;
         _charging = false;
         GameManager.I.OnWormDied(this);
         StartCoroutine(DeathSequence(drowned, sank));
@@ -1127,18 +1459,12 @@ public class Worm : MonoBehaviour
             Sfx.Bye();
         }
 
-        // Прощание короткое: полсекунды покачивания, иначе ход тянется.
-        const float wave = 0.55f;
-        for (float t = 0f; t < wave; t += Time.deltaTime)
-        {
-            if (_art != null)
-            {
-                float k = Mathf.Sin(t * 26f) * 9f;
-                _art.localRotation = Quaternion.Euler(0f, 0f, k);
-                _art.localPosition = new Vector3(0f, Mathf.Abs(Mathf.Sin(t * 13f)) * 0.12f, 0f);
-            }
-            yield return null;
-        }
+        // Прощание короткое, иначе ход тянется. Длину задаёт сам клип: раньше
+        // качание вела крутилка трансформа, теперь это кадры, как всё остальное,
+        // и секундомер с картинкой не разъезжаются.
+        float wave = _anim != null ? _anim.Farewell() : 0.55f;
+        for (float t = 0f; t < wave; t += Time.deltaTime) yield return null;
+        if (_anim != null) _anim.enabled = false;
 
         if (_body != null) _body.enabled = false;
         if (_face != null) _face.enabled = false;

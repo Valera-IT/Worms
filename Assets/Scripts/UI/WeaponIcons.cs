@@ -16,6 +16,162 @@ public static class WeaponIcons
     static readonly Color32 SteelLit = new Color32(206, 212, 220, 255);
     static readonly Color32 Wood = new Color32(126, 84, 44, 255);
 
+    // Ракета: тёмный корпус со светлым бликом, светлый нос и белый дым.
+    static readonly Color32 Hull = new Color32(38, 46, 84, 255);
+    static readonly Color32 HullLit = new Color32(96, 120, 186, 255);
+    static readonly Color32 Nose = new Color32(206, 232, 255, 255);
+    static readonly Color32 Smoke = new Color32(250, 250, 252, 255);
+
+    static Sprite _missile;
+    static Sprite _cross;
+
+    /// Ракета в полёте — отдельная картинка, а не иконка панели: смотрит вправо,
+    /// и Projectile разворачивает её по вектору скорости.
+    public static Sprite Missile
+    {
+        get
+        {
+            if (_missile != null) return _missile;
+
+            // Рисуем прямоугольниками, а не кистью: круглые концы Line на
+            // картинке в тридцать пикселей раздувают нос в шар.
+            var p = new Pix(32, 14);
+            p.Rect(7, 4, 15, 6, Hull);          // корпус
+            p.Rect(8, 8, 13, 2, HullLit);       // блик по верхней кромке
+
+            // Нос клином: колонка за колонкой, высота сходит к единице.
+            for (int i = 0; i < 7; i++)
+            {
+                int h = Mathf.Max(1, 6 - i);
+                p.Rect(22 + i, 4 + (6 - h) / 2, 1, h, Nose);
+            }
+
+            // Оперение двумя уступами и огонёк двигателя в хвосте.
+            p.Rect(4, 2, 4, 3, Hull);
+            p.Rect(4, 9, 4, 3, Hull);
+            p.Disc(4f, 7f, 2.0f, new Color32(252, 196, 64, 255));
+
+            p.Outline(Ink);
+            _missile = p.ToSprite(40f);
+            _missile.name = "MissileSprite";
+            return _missile;
+        }
+    }
+
+    static Sprite _powerBeam;
+
+    /// Полоса силы: клин, расходящийся от червя вперёд, с переливом поперёк —
+    /// светло-жёлтым по верхней кромке и красным по нижней, как в оригинале.
+    /// Перелив идёт поперёк луча, а не вдоль, поэтому растягивать картинку по
+    /// длине можно без вреда: тянутся ровные полосы одного цвета.
+    ///
+    /// Пивот — в узком конце: полоса растёт из ствола, а не в обе стороны от
+    /// своей середины.
+    public static Sprite PowerBeam
+    {
+        get
+        {
+            if (_powerBeam != null) return _powerBeam;
+
+            const int w = 64, h = 22;
+            var p = new Pix(w, h);
+
+            var top = new Color(1f, 0.96f, 0.62f);
+            var mid = new Color(1f, 0.6f, 0.12f);
+            var low = new Color(0.85f, 0.13f, 0.11f);
+
+            for (int x = 0; x < w; x++)
+            {
+                // Клин: у ствола почти остриё, к концу — во всю высоту.
+                float half = Mathf.Lerp(1.6f, (h - 2) * 0.5f, x / (float)(w - 1));
+                int y0 = Mathf.RoundToInt(h * 0.5f - half);
+                int y1 = Mathf.RoundToInt(h * 0.5f + half);
+
+                for (int y = y0; y <= y1; y++)
+                {
+                    float t = y1 > y0 ? (y - y0) / (float)(y1 - y0) : 0.5f;
+                    // t растёт сверху вниз по клину, поэтому светлое — в начале.
+                    var c = t < 0.5f ? Color.Lerp(top, mid, t * 2f)
+                                     : Color.Lerp(mid, low, (t - 0.5f) * 2f);
+                    p.Set(x, y, c);
+                }
+            }
+
+            p.Outline(Ink);
+            _powerBeam = p.ToSprite(32f, new Vector2(0f, 0.5f));
+            _powerBeam.name = "PowerBeamSprite";
+            return _powerBeam;
+        }
+    }
+
+    /// Крестик наводки: та самая метка попадания, которую на Сеге ставили
+    /// джойстиком до выстрела.
+    public static Sprite CrossMark
+    {
+        get
+        {
+            if (_cross != null) return _cross;
+
+            var p = new Pix(30, 30);
+            var gold = new Color32(250, 176, 32, 255);
+            var hot = new Color32(255, 226, 128, 255);
+            p.Line(7f, 7f, 22f, 22f, 6.5f, gold);
+            p.Line(22f, 7f, 7f, 22f, 6.5f, gold);
+            p.Line(9f, 9f, 20f, 20f, 2f, hot);
+            p.Line(20f, 9f, 9f, 20f, 2f, hot);
+
+            p.Outline(Ink);
+            // 30 пикселей на 32 — крестик выходит ростом почти в юнит, вровень
+            // с червём: мельче его на карте попросту не разглядеть.
+            _cross = p.ToSprite(32f);
+            _cross.name = "CrossMarkSprite";
+            return _cross;
+        }
+    }
+
+    static Sprite _sight;
+
+    /// Прицел направления: кольцо с перекрестием, как в оригинале, — стоит
+    /// перед червём в ту сторону, куда он целится. Красное с тёмной обводкой:
+    /// на снегу, песке и в чёрной пещере одинаково видно.
+    public static Sprite Sight
+    {
+        get
+        {
+            if (_sight != null) return _sight;
+
+            const int n = 34;
+            float c = n * 0.5f - 0.5f;
+            var p = new Pix(n, n);
+            var red = new Color32(228, 54, 66, 255);
+            var hot = new Color32(255, 146, 152, 255);
+
+            // Кольцо: диск и вырезанная середина. Вырезаем прозрачным — так же
+            // делается дырка в любом другом спрайте проекта.
+            p.Disc(c, c, 11.5f, red);
+            p.Disc(c, c, 8.5f, Pix.Clear);
+            p.Disc(c, c, 11f, hot);
+            p.Disc(c, c, 9f, Pix.Clear);
+
+            // Четыре луча наружу, с прогалом в самом центре: перекрестие без
+            // дырки закрывало бы собой ту точку, на которую наводят.
+            for (int i = 0; i < 4; i++)
+            {
+                float dx = i == 0 ? 1 : i == 1 ? -1 : 0;
+                float dy = i == 2 ? 1 : i == 3 ? -1 : 0;
+                p.Line(c + dx * 3.5f, c + dy * 3.5f, c + dx * 16f, c + dy * 16f, 3.2f, red);
+                p.Line(c + dx * 4f, c + dy * 4f, c + dx * 15f, c + dy * 15f, 1.4f, hot);
+            }
+
+            p.Outline(Ink);
+            // 34 пикселя на 30 — кольцо чуть больше червя, как на скриншотах
+            // оригинала: меньше теряется на пёстрой земле.
+            _sight = p.ToSprite(30f);
+            _sight.name = "SightSprite";
+            return _sight;
+        }
+    }
+
     /// Та же иконка мировым спрайтом: ею летит банан и лежат динамит, мина и
     /// овца. 60 пикселей на юнит — картинка 48×48 выходит ростом в 0,8 юнита,
     /// чуть меньше червя.
@@ -29,6 +185,28 @@ public static class WeaponIcons
         s.name = "Weapon_" + kind;
         SpriteCache[kind] = s;
         return s;
+    }
+
+    /// Под каким углом иконка нарисована на холсте. Ствол в руках червя
+    /// доворачивается на этот угол назад — иначе базука, нарисованная для
+    /// панели по диагонали, целилась бы на сорок пять градусов выше прицела.
+    /// NaN — предмет не наводят: граната, динамит и овца висят в руке ровно,
+    /// как их нарисовали, и вертеть их за прицелом незачем.
+    public static float Lean(WeaponKind kind)
+    {
+        switch (kind)
+        {
+            case WeaponKind.Bazooka: return 0f;    // труба нарисована горизонтально
+            case WeaponKind.Homing: return 45f;
+            case WeaponKind.Mortar: return 54f;
+            case WeaponKind.Shotgun: return 25f;
+            case WeaponKind.Uzi: return 0f;
+            case WeaponKind.Bat: return 48f;
+            case WeaponKind.Girder: return 28f;
+            case WeaponKind.Blowtorch: return 0f;
+            case WeaponKind.Prod: return 0f;
+            default: return float.NaN;
+        }
     }
 
     public static Texture2D Get(WeaponKind kind)
@@ -58,6 +236,12 @@ public static class WeaponIcons
             WeaponKind.Girder => GirderIcon(),
             WeaponKind.Parachute => ChuteIcon(),
             WeaponKind.Jetpack => JetIcon(),
+            WeaponKind.HolyGrenade => HolyIcon(),
+            WeaponKind.SuperSheep => SuperSheepIcon(),
+            WeaponKind.Anvil => AnvilIcon(),
+            WeaponKind.Napalm => NapalmIcon(),
+            WeaponKind.MineStrike => MineStrikeIcon(),
+            WeaponKind.Donkey => DonkeyIcon(),
             _ => TeleportIcon()
         };
 
@@ -67,24 +251,207 @@ public static class WeaponIcons
         return tex;
     }
 
+    /// Святая граната: та же граната, но золотая, с крестом наверху и нимбом.
+    /// Крест и нимб — единственное, чем она отличается от обычной в панели,
+    /// поэтому оба рисуем крупно: в слоте семьдесят шесть пикселей мелочь
+    /// сливается в пятно.
+    static Pix HolyIcon()
+    {
+        var p = new Pix(S, S);
+        var gold = new Color32(214, 168, 46, 255);
+        var goldLit = new Color32(250, 224, 128, 255);
+        var goldDim = new Color32(150, 112, 22, 255);
+
+        p.Disc(23f, 16f, 12f, gold);
+        p.Disc(18f, 20f, 5f, goldLit);
+        p.Disc(29f, 10f, 4.5f, goldDim);
+
+        // Нимб — кольцо над крестом: диск светлым, середина обратно в пустоту,
+        // нижняя половина срезана. Рисуем его до креста: срез идёт по всей
+        // ширине холста и снёс бы крестовину, попадись она раньше.
+        p.Disc(23f, 43f, 5.5f, goldLit);
+        p.Disc(23f, 43f, 3.4f, Pix.Clear);
+        p.Rect(11, 34, 26, 9, Pix.Clear);
+
+        // Крест: стойка от макушки корпуса до нимба и широкая крестовина.
+        p.Rect(21, 26, 5, 14, goldLit);
+        p.Rect(15, 32, 17, 5, goldLit);
+        return p;
+    }
+
+    /// Супер-овца: та же овца, но в очках и с огнём из-под хвоста.
+    static Pix SuperSheepIcon()
+    {
+        var p = new Pix(S, S);
+        var wool = new Color32(236, 242, 250, 255);
+        var woolDim = new Color32(190, 202, 220, 255);
+        var dark = new Color32(46, 42, 48, 255);
+        var glass = new Color32(94, 196, 232, 255);
+
+        p.Rect(18, 8, 3, 6, dark);              // ноги поджаты: овца летит
+        p.Rect(24, 8, 3, 6, dark);
+
+        p.Disc(22f, 24f, 11f, wool);            // руно
+        p.Disc(31f, 22f, 8f, wool);
+        p.Disc(15f, 21f, 7f, woolDim);
+
+        p.Disc(36f, 25f, 6f, dark);             // морда
+        p.Disc(33f, 32f, 3f, dark);             // ухо
+        p.Rect(33, 26, 11, 4, glass);           // очки
+        p.Rect(34, 27, 3, 2, new Color32(198, 240, 255, 255));   // блик в стекле
+
+        // Факел из-под хвоста: три языка, уходящие назад и вниз. Держим их
+        // ниже руна: на одной с ним высоте огонь читался мордой, и овца
+        // получалась двухголовой.
+        p.Disc(9f, 13f, 3.8f, new Color32(252, 196, 64, 255));
+        p.Disc(5f, 11f, 2.6f, new Color32(240, 128, 40, 255));
+        p.Disc(2f, 10f, 1.6f, new Color32(214, 74, 32, 255));
+        return p;
+    }
+
+    /// Наковальня: подошва, талия и рог. Рисуется прямоугольниками — у железа
+    /// на такой стороне не должно быть ни одного скруглённого края.
+    static Pix AnvilIcon()
+    {
+        var p = new Pix(S, S);
+        var iron = new Color32(78, 84, 96, 255);
+        var ironLit = new Color32(138, 146, 162, 255);
+        var ironDim = new Color32(46, 50, 60, 255);
+
+        p.Rect(12, 6, 24, 6, iron);          // подошва
+        p.Rect(18, 12, 12, 10, ironDim);     // талия
+        p.Rect(8, 22, 32, 10, iron);         // наковальня
+        p.Rect(9, 29, 30, 3, ironLit);       // блик по рабочей плоскости
+
+        // Рог: колонка за колонкой сходит на нет вправо.
+        for (int i = 0; i < 8; i++)
+        {
+            int h = Mathf.Max(2, 9 - i);
+            p.Rect(40 + i, 22 + (9 - h) / 2, 1, h, iron);
+        }
+        return p;
+    }
+
+    /// Напалм: бак с горючим, из горловины бьёт пламя, вниз капает огонь.
+    static Pix NapalmIcon()
+    {
+        var p = new Pix(S, S);
+        var can = new Color32(96, 88, 62, 255);
+        var canLit = new Color32(146, 136, 96, 255);
+
+        p.Rect(13, 20, 22, 20, can);         // бак
+        p.Rect(15, 24, 3, 14, canLit);       // блик
+        p.Rect(19, 40, 10, 4, can);          // горловина
+
+        p.Disc(24f, 46f, 4f, new Color32(252, 208, 96, 255));    // факел
+        p.Disc(24f, 44f, 2f, new Color32(255, 244, 200, 255));
+
+        // Капли: три языка огня, стекающие из-под бака.
+        p.Disc(15f, 15f, 4f, new Color32(240, 128, 36, 255));
+        p.Disc(24f, 11f, 4.6f, new Color32(252, 172, 48, 255));
+        p.Disc(33f, 15f, 4f, new Color32(240, 128, 36, 255));
+        p.Disc(24f, 9f, 2.2f, new Color32(255, 232, 160, 255));
+        return p;
+    }
+
+    /// Минный удар: тот же самолёт, что у налёта, но сыплет минами — рогатыми
+    /// шариками, а не бомбами. Разница в панели должна читаться с одного
+    /// взгляда: два соседних слота отличаются только грузом.
+    static Pix MineStrikeIcon()
+    {
+        var p = new Pix(S, S);
+        var plane = new Color32(120, 140, 168, 255);
+        var planeLit = new Color32(186, 204, 226, 255);
+
+        p.Line(8f, 34f, 40f, 40f, 6f, plane);          // фюзеляж
+        p.Line(10f, 36f, 36f, 41f, 2f, planeLit);
+        p.Line(20f, 40f, 26f, 30f, 4f, plane);         // крыло вниз
+        p.Line(20f, 38f, 16f, 45f, 4f, plane);         // киль
+        p.Disc(38f, 40f, 3.4f, planeLit);              // нос
+
+        var shell = new Color32(96, 100, 108, 255);
+        var spark = new Color32(226, 62, 48, 255);
+        for (int i = 0; i < 3; i++)
+        {
+            float cx = 14f + i * 8f, cy = 22f - i * 7f;
+            p.Disc(cx, cy, 4f, shell);
+            p.Line(cx - 3f, cy + 3f, cx - 5f, cy + 6f, 1.6f, shell);   // усики
+            p.Line(cx + 3f, cy + 3f, cx + 5f, cy + 6f, 1.6f, shell);
+            p.Disc(cx, cy + 5f, 1.4f, spark);
+        }
+        return p;
+    }
+
+    /// Бетонный осёл: серый истукан анфас. Цвет — бетон, без единого блика
+    /// на металле: он не отлит, а вылит.
+    static Pix DonkeyIcon()
+    {
+        var p = new Pix(S, S);
+        var stone = new Color32(146, 142, 134, 255);
+        var stoneLit = new Color32(188, 184, 176, 255);
+        var stoneDim = new Color32(96, 94, 90, 255);
+
+        p.Rect(10, 6, 5, 12, stone);         // ноги
+        p.Rect(19, 6, 5, 12, stone);
+        p.Rect(28, 6, 5, 12, stone);
+
+        p.Rect(8, 17, 27, 14, stone);        // туловище
+        p.Rect(9, 27, 25, 3, stoneLit);      // спина посветлее
+        p.Rect(8, 17, 27, 3, stoneDim);      // тень под брюхом
+
+        p.Rect(30, 28, 10, 12, stone);       // голова
+        p.Rect(36, 24, 8, 6, stone);         // морда
+        p.Rect(31, 40, 3, 7, stone);         // уши
+        p.Rect(36, 40, 3, 7, stone);
+        p.Disc(38f, 34f, 1.6f, stoneDim);    // глаз
+
+        p.Rect(4, 24, 5, 3, stone);          // хвост
+        return p;
+    }
+
     /// Ракета носом вверх-вправо, с оперением и огоньком в сопле.
+    /// Базука — жёлтая труба одной толщины с чёрным хватом, как в оригинале.
+    /// Раструба у дула нет: труба не расширяется, а спереди в ней видно
+    /// круглое жерло в её же диаметре — тёмный кружок в жёлтом ободке.
+    /// Смотрит вправо и лежит горизонтально: в руках у червя её доворачивает
+    /// прицел (см. Lean), и наклон в самом рисунке этому мешал бы.
     static Pix Bazooka()
     {
         var p = new Pix(S, S);
-        var red = new Color32(198, 58, 46, 255);
-        var redLit = new Color32(238, 112, 92, 255);
+        var tube = new Color32(232, 186, 36, 255);
+        var tubeLit = new Color32(255, 236, 140, 255);
+        var tubeDim = new Color32(168, 126, 18, 255);
+        var grip = new Color32(38, 36, 42, 255);
+        var bore = new Color32(26, 24, 28, 255);
 
-        // Корпус по диагонали и конус носа.
-        p.Line(12f, 12f, 34f, 34f, 11f, Steel);
-        p.Line(11f, 14f, 31f, 34f, 3f, SteelLit);
-        for (int i = 0; i < 12; i++)
-            p.Disc(34f + i * 0.6f, 34f + i * 0.6f, 5.5f - i * 0.42f, i < 4 ? red : redLit);
+        const float axis = 26f;
+        const float thick = 11.5f;
 
-        // Оперение и выхлоп.
-        p.Line(14f, 10f, 8f, 16f, 4f, Steel);
-        p.Line(10f, 14f, 16f, 8f, 4f, Steel);
-        p.Disc(9f, 9f, 4f, new Color32(252, 196, 64, 255));
-        p.Disc(6f, 6f, 2.6f, new Color32(248, 128, 40, 255));
+        // Труба одной толщины от казённика до дула.
+        p.Line(9f, axis, 39f, axis, thick, tube);
+
+        // Низ в тень, верх — два светлых штриха вдоль, как блик на цилиндре.
+        p.Line(10f, axis - 3.4f, 38f, axis - 3.4f, 2.4f, tubeDim);
+        p.Line(11f, axis + 2.8f, 27f, axis + 2.8f, 2f, tubeLit);
+        p.Line(34f, axis + 2.8f, 36f, axis + 2.8f, 2f, tubeLit);
+
+        // Жерло: тёмный кружок в самом торце, ободок трубы вокруг него.
+        // Жерло почти во всю трубу: узкий ободок и тёмная дыра — иначе
+        // в руках у червя, где иконка втрое мельче, дуло не разглядеть.
+        p.Disc(39f, axis, 4.8f, bore);
+        p.Disc(39.4f, axis, 3.4f, new Color32(14, 12, 16, 255));
+
+        // Казённик прикрыт: тень на скруглении, а не дырка.
+        p.Disc(9.5f, axis, 3f, tubeDim);
+
+        // Чёрное кольцо на трубе — и всё. Рукояти вниз у базуки в оригинале
+        // нет: на рисунке снизу не деталь оружия, а рука червя. Кольцо лежит
+        // ровно в диаметре трубы: прямоугольником, а не линией с круглыми
+        // концами, — та выпирала за бока на радиус кисти. Стоит на трети
+        // длины от дульного среза, а не посередине.
+        p.Rect(28, Mathf.CeilToInt(axis - thick * 0.5f), 5,
+               Mathf.FloorToInt(axis + thick * 0.5f) - Mathf.CeilToInt(axis - thick * 0.5f) + 1, grip);
+
         return p;
     }
 
@@ -152,28 +519,29 @@ public static class WeaponIcons
     }
 
 
-    /// Самонаводящаяся: ракета с носовым конусом и кольцом захвата.
+    /// Самонаводящаяся: тёмная ракета с белым дымным следом — ровно та, что
+    /// летит по карте, и та же, что была на Сеге. Носовой конус светлый,
+    /// хвост уходит в клубки дыма.
     static Pix Homing()
     {
         var p = new Pix(S, S);
-        var body = new Color32(232, 128, 44, 255);
-        var lit = new Color32(252, 186, 112, 255);
 
-        p.Line(10f, 18f, 32f, 30f, 10f, body);
-        p.Line(10f, 20f, 30f, 31f, 3f, lit);
-        for (int i = 0; i < 10; i++)
-            p.Disc(32f + i * 0.7f, 30f + i * 0.38f, 5f - i * 0.42f, new Color32(226, 66, 52, 255));
+        // След: клубки от угла к хвосту, чем дальше — тем крупнее и бледнее.
+        p.Disc(6f, 8f, 5.0f, new Color32(232, 235, 242, 255));
+        p.Disc(13f, 15f, 3.9f, new Color32(242, 244, 249, 255));
+        p.Disc(18f, 20f, 2.9f, Smoke);
 
-        p.Line(12f, 15f, 7f, 20f, 4f, Steel);
-        p.Disc(8f, 15f, 3.6f, new Color32(252, 196, 64, 255));
+        // Корпус по диагонали вверх-вправо, как у базуки рядом.
+        p.Line(21f, 23f, 35f, 37f, 9f, Hull);
+        p.Line(20f, 25f, 32f, 37f, 3f, HullLit);
 
-        // Кольцо захвата у носа.
-        var ring = new Color32(120, 230, 140, 255);
-        for (int a = 0; a < 26; a++)
-        {
-            float t = a / 26f * Mathf.PI * 2f;
-            p.Disc(40f + Mathf.Cos(t) * 6f, 36f + Mathf.Sin(t) * 6f, 1.2f, ring);
-        }
+        // Оперение поперёк хвоста.
+        p.Line(17f, 27f, 25f, 19f, 3f, Hull);
+
+        // Носовой конус.
+        for (int i = 0; i < 8; i++)
+            p.Disc(35f + i * 0.85f, 37f + i * 0.85f, 4.6f - i * 0.5f, Nose);
+
         return p;
     }
 

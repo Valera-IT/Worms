@@ -113,6 +113,8 @@ public class GameInput : MonoBehaviour, IGameInput, ISystemInput
     public float AimAxis => Fresh().AimAxis;
     public bool HasAimTarget => Fresh().HasAimTarget;
     public Vector2 AimTarget => Fresh().AimTarget;
+    public bool HasMark => Fresh().HasMark;
+    public Vector2 Mark => Fresh().Mark;
     public bool JumpPressed => Fresh().JumpPressed;
     public bool FirePressed => Fresh().FirePressed;
     public bool FireHeld => Fresh().FireHeld;

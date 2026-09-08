@@ -1,7 +1,7 @@
 using UnityEngine;
 
-/// Задний план карты — небо-градиент, солнце, два хребта с параллаксом,
-/// облака и своды пещеры — и украшения: деревья, пальмы, ели, кактусы и
+/// Задний план карты — небо-градиент, солнце, три хребта с параллаксом,
+/// облака, перистая рвань и своды пещеры — и украшения: деревья, пальмы, ели, кактусы и
 /// кристаллы.
 ///
 /// Задник это отдельные спрайты за ландшафтом, а украшения — нет: они
@@ -13,8 +13,9 @@ using UnityEngine;
 public static class Scenery
 {
     /// Порядки отрисовки. Ландшафт — 0, черви — 10, вода — 15.
-    const int OrderSky = -30, OrderSun = -29, OrderCavern = -28,
-              OrderRidgeFar = -26, OrderRidgeNear = -24, OrderCloud = -22;
+    const int OrderSky = -30, OrderSun = -29, OrderCirrus = -28, OrderCavern = -28,
+              OrderRidgeFarthest = -27, OrderRidgeFar = -26, OrderRidgeNear = -24,
+              OrderCloud = -22;
 
     /// Задник: небо, солнце, хребты, облака. Зовётся после Build ландшафта —
     /// цвета берутся из его стиля.
@@ -34,86 +35,188 @@ public static class Scenery
         }
         else
         {
-            BuildSun(root, style, rnd, w, h);
-            // Оба хребта стоят подошвой чуть выше воды: дальний выше и бледнее,
-            // ближний ниже, темнее и отстаёт от камеры сильнее.
-            float foot = Mathf.Max(2f, DestructibleTerrain.WaterLevel - 1f);
-            BuildRidge(root, style, rnd, style.RidgeFar, OrderRidgeFar, 0.72f, foot + 3f, 34f, 0.55f);
-            BuildRidge(root, style, rnd, style.RidgeNear, OrderRidgeNear, 0.52f, foot, 22f, 0.70f);
-            if (style.Clouds) BuildClouds(root, rnd, w, h);
-        }
+            // Солнце выбирает сторону света: от неё зависит, какие склоны
+            // хребтов освещены, а какие уходят в тень.
+            float sunX = 0.2f + 0.6f * (float)rnd.NextDouble();
+            float light = sunX < 0.5f ? -1f : 1f;
 
+            BuildSun(root, style, sunX, w, h);
+            if (style.Clouds) BuildCirrus(root, style, rnd, w, h);
+
+            // Хребтов три, а не два: чем дальше ярус, тем он выше, бледнее,
+            // глаже и меньше отстаёт от камеры. На двух глубина не читалась.
+            bool forest = style.Decor == DecorKind.Tree || style.Decor == DecorKind.Palm
+                       || style.Decor == DecorKind.Pine;
+            float foot = Mathf.Max(2f, DestructibleTerrain.WaterLevel - 1f);
+            BuildRidge(root, style, rnd, style.RidgeFar, OrderRidgeFarthest, 0.82f, foot + 7f, 44f, 0.45f, light, 0.34f, false);
+            BuildRidge(root, style, rnd, style.RidgeFar, OrderRidgeFar, 0.72f, foot + 3f, 34f, 0.60f, light, 0.16f, forest);
+            BuildRidge(root, style, rnd, style.RidgeNear, OrderRidgeNear, 0.52f, foot, 22f, 0.78f, light, 0f, forest);
+            if (style.Clouds) BuildClouds(root, style, rnd, w, h);
+            BuildBirds(root, style, rnd, w, h);
+        }
     }
 
     // ---------- небо ----------
 
     /// Вертикальный градиент от зенита к горизонту. Слой почти приклеен к
     /// камере (Factor 0,9): небо должно оставаться небом и на краю карты.
+    ///
+    /// Стопов три, а не два: у зенита плотный цвет, в середине — основной,
+    /// у горизонта светлая дымка. На двух стопах небо выглядело заливкой.
     static void BuildSky(Transform root, TerrainStyle style, float w, float h)
     {
-        var pix = new Pix(4, 128);
-        for (int y = 0; y < pix.H; y++)
+        const int TH = 256;
+        var pix = new Pix(4, TH);
+        var horizon = Color.Lerp(style.Sky, Color.white, 0.34f);
+        for (int y = 0; y < TH; y++)
         {
-            float t = y / (float)(pix.H - 1);
-            // Горизонт светлее зенита; ближе к земле добавляем ещё немного дымки.
-            var c = Color.Lerp(style.Sky, style.SkyTop, Mathf.SmoothStep(0f, 1f, t));
-            if (t < 0.22f) c = Color.Lerp(Color.Lerp(style.Sky, Color.white, 0.22f), c, t / 0.22f);
-            for (int x = 0; x < pix.W; x++) pix.Set(x, y, c);
+            float t = y / (float)(TH - 1);
+            Color c = t < 0.30f
+                ? Color.Lerp(horizon, style.Sky, Mathf.SmoothStep(0f, 1f, t / 0.30f))
+                : Color.Lerp(style.Sky, style.SkyTop, Mathf.SmoothStep(0f, 1f, (t - 0.30f) / 0.70f));
+
+            // Растянутый на пол-экрана градиент полосит; сбиваем полосы
+            // дрожанием на четверть тона. Дрожание только по строкам: колонок
+            // всего четыре, и каждая растянута на треть карты — по X это дало
+            // бы не шум, а вертикальные плиты поперёк неба.
+            float d = ((y & 3) - 1.5f) * 0.004f;
+            var cd = new Color(c.r + d, c.g + d, c.b + d, 1f);
+            for (int x = 0; x < pix.W; x++) pix.Set(x, y, cd);
         }
 
         var sr = Sprites.Make("Sky", pix.ToSprite(1f, false, FilterMode.Bilinear), Color.white, OrderSky, root);
         sr.transform.position = new Vector3(w * 0.5f, h * 0.55f, 6f);
-        sr.transform.localScale = new Vector3(w * 4f / 4f, h * 2.4f / 128f, 1f);
+        sr.transform.localScale = new Vector3(w * 4f / 4f, h * 2.4f / TH, 1f);
         ParallaxLayer.Attach(sr.gameObject, 0.9f);
     }
 
-    static void BuildSun(Transform root, TerrainStyle style, System.Random rnd, float w, float h)
+    /// Солнце: ядро, тёплый ореол и широкое зарево на полнеба. Одним диском
+    /// оно читалось наклейкой — свет должен растекаться по небу.
+    static void BuildSun(Transform root, TerrainStyle style, float sunX, float w, float h)
     {
-        var pix = new Pix(64, 64);
-        var core = Color.Lerp(Color.white, style.Sky, 0.15f);
-        pix.Soft(32f, 32f, 30f, new Color32((byte)(core.r * 255), (byte)(core.g * 255), (byte)(core.b * 255), 90), 0.9f);
-        pix.Soft(32f, 32f, 13f, new Color32(255, 250, 225, 235), 0.25f);
+        var pix = new Pix(128, 128);
+        var warm = Color.Lerp(style.Sky, new Color(1f, 0.94f, 0.78f), 0.75f);
+        pix.Soft(64f, 64f, 62f, new Color32((byte)(warm.r * 255), (byte)(warm.g * 255), (byte)(warm.b * 255), 60), 1f);
+        pix.Soft(64f, 64f, 34f, new Color32(255, 248, 226, 110), 0.95f);
+        pix.Soft(64f, 64f, 14f, new Color32(255, 252, 238, 240), 0.30f);
 
-        var sr = Sprites.Make("Sun", pix.ToSprite(6f, false, FilterMode.Bilinear), Color.white, OrderSun, root);
-        sr.transform.position = new Vector3(w * (0.2f + 0.6f * (float)rnd.NextDouble()), h * 0.86f, 5.5f);
+        var sr = Sprites.Make("Sun", pix.ToSprite(4.2f, false, FilterMode.Bilinear), Color.white, OrderSun, root);
+        sr.transform.position = new Vector3(w * sunX, h * 0.84f, 5.5f);
         ParallaxLayer.Attach(sr.gameObject, 0.88f);
     }
 
-    /// Хребет: силуэт из двух октав шума, со светлой кромкой поверху и
-    /// снежными шапками там, где вершина ушла высоко.
+    /// Хребет с объёмом: силуэт из ребристого шума, освещённые и теневые
+    /// склоны, зернистая порода, снежные шапки с рваной границей, лесная
+    /// опушка по гребню и дымка у подошвы.
+    ///
+    /// `light` — с какой стороны солнце (-1 слева, +1 справа), `haze` — на
+    /// сколько слой уже растворён в небе: дальние хребты бледнее ближних.
     static void BuildRidge(Transform root, TerrainStyle style, System.Random rnd,
                            Color color, int order, float parallax, float footY,
-                           float heightUnits, float roughness)
+                           float heightUnits, float roughness, float light,
+                           float haze, bool forest)
     {
         const int TW = 1024, TH = 256;
         var pix = new Pix(TW, TH);
 
         float o1 = (float)rnd.NextDouble() * 100f;
         float o2 = (float)rnd.NextDouble() * 100f;
+        float o3 = (float)rnd.NextDouble() * 100f;
 
-        var body = (Color32)color;
-        var rim = (Color32)Color.Lerp(color, Color.white, 0.28f);
-        var cap = (Color32)Color.Lerp(color, Color.white, 0.72f);
-        bool snowCaps = style.Kind == TerrainKind.Snow || style.Kind == TerrainKind.Island;
+        var sky = style.Sky;
+        var body = Color.Lerp(color, sky, haze);
+        var hi = Color.Lerp(body, Color.white, 0.34f);
+        var lo = Color.Lerp(body, Color.Lerp(color, Color.black, 0.65f), 0.7f);
+        var cap = Color.Lerp(body, Color.white, 0.80f);
+        var wood = Color.Lerp(new Color(0.13f, 0.24f, 0.16f), sky, Mathf.Min(0.88f, haze + 0.52f));
 
+        bool snowCaps = style.Kind == TerrainKind.Snow;
+        bool mesa = style.Kind == TerrainKind.Canyon;   // каньон растёт столовыми горами
+
+        // Профиль считаем отдельно и в дробных числах: тень на склоне зависит
+        // от соседних колонок, а на целых пикселях она вышла бы лесенкой.
+        var tops = new float[TW];
         for (int x = 0; x < TW; x++)
         {
             float nx = x / (float)TW;
-            // Сумма октав держится ниже единицы: упёршийся в верх текстуры
-            // гребень срезался бы линейкой поперёк неба.
-            float f = 0.34f
-                    + roughness * 0.62f * Mathf.PerlinNoise(nx * 7f + o1, o1 * 0.11f)
-                    + roughness * 0.28f * Mathf.PerlinNoise(nx * 19f + o2, o2 * 0.23f);
-            int top = Mathf.Clamp(Mathf.RoundToInt(f * TH), 4, TH - 6);
+            // Ребристый шум (1 - |2n-1|) даёт острые гребни вместо холмов;
+            // возведение в квадрат углубляет седловины между вершинами.
+            float r1 = Ridged(nx * 3.1f + o1, o1 * 0.13f);
+            float f = 0.22f
+                    + roughness * (0.52f * r1 * r1
+                                 + 0.26f * Ridged(nx * 8.3f + o2, o2 * 0.31f)
+                                 + 0.09f * Mathf.PerlinNoise(nx * 23f + o3, o3 * 0.7f));
+            // Столовая гора: высота встаёт ступенями, между ними — обрыв.
+            // Ступеней много и они мелкие: на семи все столовые горы выходили
+            // одной высоты, и хребет читался забором.
+            if (mesa) f = Mathf.Floor(f * 11f) / 11f + 0.010f * Mathf.PerlinNoise(nx * 60f, o3);
+            tops[x] = Mathf.Clamp(f * TH, 6f, TH - 8f);
+        }
+
+        for (int x = 0; x < TW; x++)
+        {
+            int top = Mathf.RoundToInt(tops[x]);
+            // Наклон меряем по четырём колонкам: по соседним он скачет от
+            // пикселя к пикселю и рисует вертикальные полосы вместо склона.
+            float slope = (tops[Mathf.Min(x + 6, TW - 1)] - tops[Mathf.Max(x - 6, 0)]) / 12f;
+            // Склон, повёрнутый к солнцу, светлеет; отвернувшийся уходит в тень.
+            float litSide = Mathf.Clamp(-slope * light * 1.3f, -1f, 1f);
+
+            // Снег ложится по высоте, а не отступом от гребня: иначе он идёт
+            // ровной лентой вдоль всего силуэта, включая подножия.
+            float snowLine = TH * 0.60f + TH * 0.07f * (Mathf.PerlinNoise(x * 0.012f + o2, 3.7f) - 0.5f);
+            float treeLine = 3f + 7f * Mathf.PerlinNoise(x * 0.07f + o3, 8.1f);
 
             for (int y = 0; y <= top; y++)
             {
-                Color32 c = body;
-                if (y > top - 4) c = rim;                                   // подсвеченный гребень
-                if (snowCaps && y > top - 14 && top > TH * 0.62f) c = cap;  // шапка на высоких вершинах
+                float d = top - y;                                   // глубина от гребня
+
+                var c = litSide >= 0f ? Color.Lerp(body, hi, litSide)
+                                      : Color.Lerp(body, lo, -litSide);
+
+                // Распадки: шум вытянут по вертикали, поэтому ложится
+                // промоинами сверху вниз, как на настоящем склоне.
+                float gully = Mathf.PerlinNoise(x * 0.05f + o2, y * 0.012f) - 0.5f;
+                float grain = Mathf.PerlinNoise(x * 0.22f + o3, y * 0.22f) - 0.5f;
+                float m = 1f + gully * 0.18f + grain * 0.06f;
+                // Осадочные слои: столовая гора без них — просто плита.
+                if (mesa) m += 0.09f * Mathf.Sin(y * 0.45f + Mathf.PerlinNoise(x * 0.004f + o1, 1f) * 6f);
+                c = new Color(c.r * m, c.g * m, c.b * m, 1f);
+
+                // Выходы голой породы под гребнем. Порог мягкий и вклад
+                // слабый: на резком пороге пятна шума читаются плитами.
+                float bare = Mathf.PerlinNoise(x * 0.11f + 13f, y * 0.16f + o1);
+                float bareT = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.60f, 0.85f, bare))
+                            * Mathf.Clamp01(1f - d / 40f);
+                if (bareT > 0f) c = Color.Lerp(c, litSide >= 0f ? hi : lo, bareT * 0.45f);
+
+                if (snowCaps && y > snowLine)
+                {
+                    float t = Mathf.SmoothStep(0f, 1f, (y - snowLine) / (TH * 0.10f));
+                    c = Color.Lerp(c, litSide >= 0f ? cap : Color.Lerp(cap, lo, 0.35f), t);
+                }
+
+                if (d < 2f) c = Color.Lerp(c, Color.white, 0.25f);    // подсвеченный гребень
+                if (forest && d < treeLine) c = Color.Lerp(c, wood, 0.35f);
+
+                // Подошва тонет в дымке: без неё хребет стоял вырезанным из бумаги.
+                float mist = Mathf.Clamp01(1f - y / (TH * 0.34f));
+                c = Color.Lerp(c, sky, mist * mist * (0.16f + haze * 0.5f));
+
                 pix.Set(x, y, c);
+
+                // Гребень идёт лесенкой: тексель втрое крупнее экранного
+                // пикселя. Верхний красим с дробной непрозрачностью — край
+                // сглаживается билинейным фильтром.
+                if (y == top)
+                {
+                    float frac = Mathf.Clamp01(tops[x] - top + 0.5f);
+                    pix.Set(x, y + 1, new Color(c.r, c.g, c.b, frac));
+                }
             }
         }
+
+        if (forest) StampTreeLine(pix, tops, style, rnd, wood, sky, haze);
 
         float ppu = TW / (DestructibleTerrain.WorldWidth * 2.2f);
         var sr = Sprites.Make("Ridge", pix.ToSprite(ppu, true, FilterMode.Bilinear), Color.white, order, root);
@@ -122,31 +225,187 @@ public static class Scenery
         ParallaxLayer.Attach(sr.gameObject, parallax);
     }
 
-    static void BuildClouds(Transform root, System.Random rnd, float w, float h)
+    /// Лес по гребню: не кайма вдоль силуэта, а частокол крошечных деревьев,
+    /// торчащих в небо. Именно он выдаёт масштаб — по нему видно, что хребет
+    /// далеко и велик.
+    static void StampTreeLine(Pix pix, float[] tops, TerrainStyle style, System.Random rnd,
+                              Color wood, Color sky, float haze)
     {
-        int n = 5 + rnd.Next(4);
+        var dark = Color.Lerp(wood, Color.black, 0.2f);
+        var lit = Color.Lerp(wood, Color.white, 0.16f);
+        bool conifer = style.Decor == DecorKind.Pine;
+        float o = (float)rnd.NextDouble() * 100f;
+
+        for (int x = 4; x < pix.W - 4; x += 2 + rnd.Next(3))
+        {
+            int top = Mathf.RoundToInt(tops[x]);
+            // Выше границы леса деревья не растут, у самой подошвы их не видно.
+            if (top > pix.H * (conifer ? 0.55f : 0.72f) || top < 12) continue;
+            // Лес растёт куртинами: сплошной частокол вдоль всего хребта
+            // читается зелёной гусеницей, а не склоном в деревьях.
+            if (Mathf.PerlinNoise(x * 0.014f + o, 2.5f) < 0.45f) continue;
+
+            int hgt = 2 + rnd.Next(4);
+            int wid = conifer ? Mathf.Max(1, hgt / 4) : Mathf.Max(1, hgt / 3);
+            var c = (float)rnd.NextDouble() < 0.5 ? dark : lit;
+
+            for (int dy = 0; dy < hgt; dy++)
+            {
+                // Ель сужается к верхушке, лиственное — шар на короткой ножке.
+                float t = dy / (float)hgt;
+                int half = conifer
+                    ? Mathf.CeilToInt(wid * (1f - t))
+                    : Mathf.CeilToInt(wid * Mathf.Sin(Mathf.PI * Mathf.Clamp01(t * 0.85f + 0.15f)));
+                for (int dx = -half; dx <= half; dx++)
+                    pix.Set(x + dx, top + dy, c);
+            }
+        }
+    }
+
+    /// Ребристый шум: складка вместо холма. Из него собираются гребни.
+    static float Ridged(float x, float y)
+    {
+        float n = Mathf.PerlinNoise(x, y) * 2f - 1f;
+        return 1f - Mathf.Abs(n);
+    }
+
+    /// Кучевое облако: плоское основание, клубящийся верх, светящаяся
+    /// макушка и синеватое подбрюшье. Раньше это была горсть белых кругов.
+    static Pix CloudPix(System.Random rnd, Color sky)
+    {
+        const int W = 160, H = 80;
+        float baseY = 22f;
+        var den = new float[W * H];
+
+        int puffs = 7 + rnd.Next(6);
+        for (int p = 0; p < puffs; p++)
+        {
+            float t = (p + 0.5f) / puffs;
+            // К краям облако ниже: середина вздымается, концы стелются.
+            float bell = Mathf.Sin(t * Mathf.PI);
+            float cx = 22f + (W - 44f) * t + Rng(rnd, -8f, 8f);
+            float cy = baseY + bell * Rng(rnd, 8f, 26f);
+            float r = 11f + bell * Rng(rnd, 6f, 18f);
+
+            int x0 = Mathf.Max(0, Mathf.FloorToInt(cx - r)), x1 = Mathf.Min(W - 1, Mathf.CeilToInt(cx + r));
+            int y0 = Mathf.Max(0, Mathf.FloorToInt(cy - r)), y1 = Mathf.Min(H - 1, Mathf.CeilToInt(cy + r));
+            for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++)
+            {
+                float dx = (x - cx) / r, dy = (y - cy) / r;
+                float q = 1f - (dx * dx + dy * dy);
+                if (q > 0f) den[y * W + x] += q * q;
+            }
+        }
+
+        var pix = new Pix(W, H);
+        var under = Color.Lerp(sky, Color.white, 0.52f);
+        float o = (float)rnd.NextDouble() * 100f;
+
+        // Плотность после маски основания и клочьев по краю — по ней считаем
+        // и прозрачность, и свет.
+        var k = new float[W * H];
+        for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+        {
+            float v = den[y * W + x];
+            // Основание кучевого облака срезано ровно — на нём оно и лежит.
+            v *= Mathf.Clamp01((y - baseY + 5f) / 6f);
+            // Клочья по краю: без шума край выходит циркульным.
+            v *= 0.70f + 0.6f * Mathf.PerlinNoise(x * 0.11f + o, y * 0.11f);
+            k[y * W + x] = v;
+        }
+
+        for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+        {
+            float v = k[y * W + x];
+            // Порог широкий: на узком облако выходило плитой с резаным краем.
+            float a = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.18f, 0.95f, v));
+            if (a <= 0.01f) continue;
+
+            // Свет сверху: там, где над пикселем облака уже нет, клуб освещён;
+            // под нависающим клубом — тень. Отсюда и объём.
+            float above = y + 6 < H ? k[(y + 6) * W + x] : 0f;
+            float lit = Mathf.Clamp01((v - above) * 1.4f + 0.30f);
+            float up = Mathf.Clamp01((y - baseY) / 30f);
+
+            var c = Color.Lerp(under, Color.white, Mathf.SmoothStep(0f, 1f, lit * 0.75f + up * 0.35f));
+            pix.Set(x, y, new Color(c.r, c.g, c.b, a * 0.95f));
+        }
+        return pix;
+    }
+
+    static void BuildClouds(Transform root, TerrainStyle style, System.Random rnd, float w, float h)
+    {
+        int n = 6 + rnd.Next(4);
         for (int i = 0; i < n; i++)
         {
-            var pix = new Pix(96, 40);
-            int puffs = 4 + rnd.Next(4);
-            for (int p = 0; p < puffs; p++)
-            {
-                float cx = 16f + 64f * (float)rnd.NextDouble();
-                float cy = 14f + 8f * (float)rnd.NextDouble();
-                float r = 8f + 9f * (float)rnd.NextDouble();
-                pix.Soft(cx, cy, r, new Color32(255, 255, 255, 210), 0.55f);
-            }
+            var pix = CloudPix(rnd, style.Sky);
+            float far = (float)rnd.NextDouble();                  // 0 — ближе, 1 — дальше
+            float scale = 1.0f - 0.45f * far;
 
-            float scale = 0.7f + 0.9f * (float)rnd.NextDouble();
-            var sr = Sprites.Make("Cloud", pix.ToSprite(9f, false, FilterMode.Bilinear),
-                                  new Color(1f, 1f, 1f, 0.55f + 0.3f * (float)rnd.NextDouble()), OrderCloud, root);
+            var sr = Sprites.Make("Cloud", pix.ToSprite(17f, false, FilterMode.Bilinear),
+                                  new Color(1f, 1f, 1f, 0.88f - 0.35f * far), OrderCloud, root);
             sr.transform.position = new Vector3(
                 w * (float)rnd.NextDouble(),
-                h * (0.62f + 0.35f * (float)rnd.NextDouble()), 4.5f);
+                h * (0.58f + 0.38f * (float)rnd.NextDouble()), 4.5f);
             sr.transform.localScale = Vector3.one * scale;
             // Дрейф медленный и разный: облака не должны маршировать строем.
-            ParallaxLayer.Attach(sr.gameObject, 0.8f,
-                new Vector2(0.25f + 0.5f * (float)rnd.NextDouble(), 0f), w * 1.5f);
+            ParallaxLayer.Attach(sr.gameObject, 0.78f + 0.12f * far,
+                new Vector2(0.20f + 0.45f * (1f - far), 0f), w * 1.5f);
+        }
+    }
+
+    /// Перистая рвань под самым зенитом: широкие полупрозрачные мазки,
+    /// от которых верх неба перестаёт быть пустым.
+    static void BuildCirrus(Transform root, TerrainStyle style, System.Random rnd, float w, float h)
+    {
+        const int W = 256, H = 48;
+        var pix = new Pix(W, H);
+        float o = (float)rnd.NextDouble() * 100f;
+        for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+        {
+            // Шум растянут по горизонтали в двадцать раз — оттуда и волокна.
+            float n = 0.65f * Mathf.PerlinNoise(x * 0.018f + o, y * 0.34f)
+                    + 0.35f * Mathf.PerlinNoise(x * 0.06f + o * 2f, y * 0.9f);
+            float edge = Mathf.Sin(Mathf.PI * y / (H - 1f));       // к краям полосы сходят на нет
+            float a = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.52f, 0.78f, n)) * edge * 0.5f;
+            if (a > 0.01f) pix.Set(x, y, new Color(1f, 1f, 1f, a));
+        }
+
+        // Полоса должна лежать под зенитом, а не накрывать полкарты: считаем
+        // масштаб от высоты мира, иначе растянутый шум идёт плитами по небу.
+        float ppu = W / (w * 1.8f);
+        var sr = Sprites.Make("Cirrus", pix.ToSprite(ppu, false, FilterMode.Bilinear),
+                              new Color(1f, 1f, 1f, 0.8f), OrderCirrus, root);
+        sr.transform.position = new Vector3(w * 0.5f, h * 0.92f, 5f);
+        sr.transform.localScale = new Vector3(1f, h * 0.28f / (H / ppu), 1f);
+        ParallaxLayer.Attach(sr.gameObject, 0.88f, new Vector2(0.12f, 0f), w * 1.8f);
+    }
+
+    /// Стайка птиц: три-пять галочек под облаками. Мелочь, но небо перестаёт
+    /// быть пустой заливкой, а параллакс получает ещё один ярус.
+    static void BuildBirds(Transform root, TerrainStyle style, System.Random rnd, float w, float h)
+    {
+        int flocks = 1 + rnd.Next(2);
+        for (int f = 0; f < flocks; f++)
+        {
+            var pix = new Pix(48, 24);
+            var ink = Color.Lerp(style.RidgeNear, style.Sky, 0.35f);
+            int n = 3 + rnd.Next(3);
+            for (int i = 0; i < n; i++)
+            {
+                float bx = Rng(rnd, 6f, 42f), by = Rng(rnd, 5f, 19f), r = Rng(rnd, 2.2f, 3.6f);
+                pix.Line(bx - r, by, bx, by + r * 0.55f, 1.1f, ink);
+                pix.Line(bx, by + r * 0.55f, bx + r, by, 1.1f, ink);
+            }
+
+            var sr = Sprites.Make("Birds", pix.ToSprite(7f, false, FilterMode.Bilinear),
+                                  new Color(1f, 1f, 1f, 0.75f), OrderCloud, root);
+            sr.transform.position = new Vector3(w * Rng(rnd, 0.15f, 0.85f), h * Rng(rnd, 0.6f, 0.85f), 4.4f);
+            ParallaxLayer.Attach(sr.gameObject, 0.74f, new Vector2(Rng(rnd, 0.6f, 1.2f), 0f), w * 1.5f);
         }
     }
 
@@ -161,10 +420,10 @@ public static class Scenery
         float o = (float)rnd.NextDouble() * 100f;
 
         // Задник держим тёмным: на ярком фоне не видно ни червей, ни снарядов.
-        var deep = (Color32)style.Sky;
-        var wall = (Color32)Color.Lerp(style.Sky, style.RidgeFar, 0.55f);
-        var rim = (Color32)Color.Lerp(style.Sky, style.RidgeNear, 0.7f);
-        var lit = (Color32)Color.Lerp(style.Sky, style.RidgeNear, 0.95f);
+        var deep = (Color)style.Sky;
+        var wall = Color.Lerp(style.Sky, style.RidgeFar, 0.55f);
+        var rim = Color.Lerp(style.Sky, style.RidgeNear, 0.7f);
+        var lit = Color.Lerp(style.Sky, style.RidgeNear, 0.95f);
 
         // Период шума — примерно три юнита: столько и занимает один пузырь.
         float f1 = 1f / (3f * ppu);
@@ -174,10 +433,17 @@ public static class Scenery
             float n = 0.7f * Mathf.PerlinNoise(x * f1 + o, y * f1 * 1.15f + o)
                     + 0.3f * Mathf.PerlinNoise(x * f1 * 2.7f + 41f, y * f1 * 2.7f + 17f);
             float d = n - 0.5f;
-            Color32 c = d < 0f ? deep : wall;
+            Color c = d < 0f ? deep : wall;
             if (Mathf.Abs(d) < 0.03f) c = rim;                        // ободок пузыря
             if (d > 0.13f) c = lit;                                   // блик на перемычке
-            pix.Set(x, y, c);
+
+            // Своды глубже — темнее: свет сюда попадает только снизу.
+            float depth = Mathf.Clamp01((y - TH * 0.35f) / (TH * 0.65f));
+            c = Color.Lerp(c, deep, depth * 0.55f);
+            // Зерно, чтобы порода не выглядела залитой.
+            float grain = Mathf.PerlinNoise(x * 0.4f + 3f, y * 0.4f) - 0.5f;
+            float m = 1f + grain * 0.10f;
+            pix.Set(x, y, new Color(c.r * m, c.g * m, c.b * m, 1f));
         }
 
         var sr = Sprites.Make("Cavern", pix.ToSprite(ppu, false, FilterMode.Bilinear),
@@ -275,6 +541,8 @@ public static class Scenery
         y = terrain.SurfaceHeightWorld(x);
         if (y < 0f) return false;
         if (y < DestructibleTerrain.WaterLevel + 0.8f) return false;
+        // На настиле моста пальме расти не с чего.
+        if (terrain.IsDeckPixel(terrain.WorldToPixelX(x), terrain.WorldToPixelY(y) - 1)) return false;
 
         float l = terrain.SurfaceHeightWorld(x - 0.9f);
         float r = terrain.SurfaceHeightWorld(x + 0.9f);

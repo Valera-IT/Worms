@@ -114,9 +114,13 @@ public class Pix
     /// Спрайт с пивотом в основании (деревья и кактусы ставятся на землю)
     /// либо в центре (облака, горы).
     public Sprite ToSprite(float pixelsPerUnit, bool pivotAtFoot = false, FilterMode filter = FilterMode.Point)
+        => ToSprite(pixelsPerUnit, pivotAtFoot ? new Vector2(0.5f, 0f) : new Vector2(0.5f, 0.5f), filter);
+
+    /// Пивот произвольной точкой — тому, что растёт из своего основания, а не
+    /// стоит на земле: полосе силы, которая тянется от червя вперёд.
+    public Sprite ToSprite(float pixelsPerUnit, Vector2 pivot, FilterMode filter = FilterMode.Point)
     {
         var tex = ToTexture(filter);
-        var pivot = pivotAtFoot ? new Vector2(0.5f, 0f) : new Vector2(0.5f, 0.5f);
         return Sprite.Create(tex, new Rect(0, 0, W, H), pivot, pixelsPerUnit, 0, SpriteMeshType.FullRect);
     }
 }

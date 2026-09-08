@@ -12,6 +12,9 @@ public class KeyboardInput : IHumanInput
     public float AimAxis { get; private set; }
     public bool HasAimTarget => false;
     public Vector2 AimTarget => Vector2.zero;
+    /// Крестик игрок водит сам: готовой точки у живого ввода нет.
+    public bool HasMark => false;
+    public Vector2 Mark => Vector2.zero;
     public bool JumpPressed { get; private set; }
     public bool FirePressed { get; private set; }
     public bool FireHeld { get; private set; }
