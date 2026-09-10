@@ -332,7 +332,43 @@ public static class NetTest
                 _host.Match.SendTerrainOp(TerrainOp.Blast(new Vector2(3f, 4f), 1.5f));
                 _host.Match.SendTerrainOp(TerrainOp.Dug(new Vector2(0f, 0f), new Vector2(2f, 1f), 0.5f));
                 _host.Match.SendTerrainOp(TerrainOp.Beam(new Vector2(5f, 6f), 30f, 4f, 0.4f, new Color32(200, 100, 50, 255)));
-                Advance(10);
+                Advance(33);
+                break;
+
+            case 33:
+                // Предметы на карте: мира с двумя копиями ящиков в одном
+                // процессе не сделать, поэтому проверяем то, что от мира не
+                // зависит, — что объявление уезжает и приезжает целым.
+                Say("--- ящики, мины и бочки ---");
+                _props = 0;
+                _client.Transport.Received += OnProp;
+                _host.Match.SendPropSpawn(NetProp.Crate, 7, new Vector2(12.5f, 5.25f),
+                                          (int)CrateKind.Ammo, (int)WeaponKind.Bazooka);
+                _host.Match.SendPropGone(NetProp.Barrel, 9, PropGone.Blown,
+                                         new Vector2(20f, 6f), Barrel.BlastRadius);
+                Advance(34);
+                break;
+
+            case 34:
+                if (_props >= 2)
+                {
+                    _client.Transport.Received -= OnProp;
+                    Check(_spawnProp == NetProp.Crate && _spawnId == 7
+                          && Vector2.Distance(_spawnAt, new Vector2(12.5f, 5.25f)) < 0.1f
+                          && _spawnKind == CrateKind.Ammo && _spawnAmmo == WeaponKind.Bazooka,
+                          $"объявление ящика доехало целиком: {_spawnProp} №{_spawnId} {_spawnAt} {_spawnKind}/{_spawnAmmo}");
+                    Check(_goneProp == NetProp.Barrel && _goneId == 9 && _goneWhy == PropGone.Blown
+                          && Vector2.Distance(_goneAt, new Vector2(20f, 6f)) < 0.1f
+                          && Mathf.Abs(_goneRadius - Barrel.BlastRadius) < 0.1f,
+                          $"объявление взорванной бочки доехало целиком: {_goneProp} №{_goneId} {_goneWhy} {_goneAt} r={_goneRadius:0.##}");
+                    Advance(10);
+                }
+                else if (Since > 3.0)
+                {
+                    Fail($"объявления о предметах не доехали: пакетов {_props} из 2");
+                    _client.Transport.Received -= OnProp;
+                    Advance(10);
+                }
                 break;
 
             case 10:
@@ -458,6 +494,50 @@ public static class NetTest
     static void OnEvent(int peer, byte[] data, int length)
     {
         if (length > 0 && data[0] == (byte)NetMsg.Event) _events++;
+    }
+
+    static int _props;
+    static NetProp _spawnProp;
+    static int _spawnId;
+    static Vector2 _spawnAt;
+    static CrateKind _spawnKind;
+    static WeaponKind _spawnAmmo;
+    static NetProp _goneProp;
+    static int _goneId;
+    static PropGone _goneWhy;
+    static Vector2 _goneAt;
+    static float _goneRadius;
+
+    /// Разбираем объявление о предмете тем же ридером, каким его читает игра:
+    /// так тест ловит не «пакет пришёл», а «пришло ровно то, что послали».
+    static void OnProp(int peer, byte[] data, int length)
+    {
+        if (length < 2 || data[0] != (byte)NetMsg.Event) return;
+        var ev = (NetEvent)data[1];
+        var r = new NetReader(data, 2, length - 2);
+
+        if (ev == NetEvent.PropSpawn)
+        {
+            var kind = (NetProp)r.U8();
+            int id = r.U16();
+            var pos = r.Vec();
+            var a = (CrateKind)r.U8();
+            var b = (WeaponKind)r.U8();
+            if (!r.Ok) return;
+            _spawnProp = kind; _spawnId = id; _spawnAt = pos; _spawnKind = a; _spawnAmmo = b;
+            _props++;
+        }
+        else if (ev == NetEvent.PropGone)
+        {
+            var kind = (NetProp)r.U8();
+            int id = r.U16();
+            var why = (PropGone)r.U8();
+            var pos = r.Vec();
+            float radius = r.Coord();
+            if (!r.Ok) return;
+            _goneProp = kind; _goneId = id; _goneWhy = why; _goneAt = pos; _goneRadius = radius;
+            _props++;
+        }
     }
 
     static void OnBig(int peer, byte[] data, int length)

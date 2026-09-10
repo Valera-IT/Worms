@@ -104,6 +104,7 @@ public class GameManager : MonoBehaviour
         Crate.Forget();
         Mine.Forget();
         Barrel.Forget();
+        NetProps.Reset();
         // Промахи прошлого матча к новой карте отношения не имеют.
         BotMemory.Clear();
         Terrain = null;
@@ -156,6 +157,7 @@ public class GameManager : MonoBehaviour
         Crate.Forget();
         Mine.Forget();
         Barrel.Forget();
+        NetProps.Reset();
 
         // Ландшафт. Тип мира берём из конфига; «Случайный» раскрывается из сида.
         var tGo = new GameObject("Terrain");
@@ -416,11 +418,9 @@ public class GameManager : MonoBehaviour
         if (chance <= 0f || Random.value > chance) return;
         // Больше четырёх ящиков на карте — это уже свалка, а не подарок.
         if (Crate.All.Count >= 4) return;
-        var crate = Crate.DropRandom(Terrain);
         // Сброс — бросок случайных чисел, повторить его у клиента нечем:
-        // хост объявляет упавший ящик отдельным сообщением.
-        if (crate != null && NetGame.I != null && NetGame.I.Match != null)
-            NetGame.I.Match.SendCrateDrop(crate.Kind, crate.transform.position.x);
+        // упавший ящик хост объявляет сам, изнутри Crate.Drop.
+        Crate.DropRandom(Terrain);
     }
 
     public bool HasAmmo(int weaponIndex)

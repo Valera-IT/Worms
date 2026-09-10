@@ -10,6 +10,10 @@ public class Mine : MonoBehaviour
     /// Живые мины: по ним ходит взрыв, поэтому список, а не поиск по сцене.
     public static readonly List<Mine> All = new List<Mine>();
 
+    /// Номер мины в сетевом бою: по нему хост объявляет, что рванула именно
+    /// эта. В одиночном бою номер не значит ничего.
+    public int NetId { get; private set; }
+
     Weapon _weapon;
     SpriteRenderer _sr;
     float _arm = 3f;          // три секунды взвода: столько свой червь бежит прочь
@@ -28,7 +32,35 @@ public class Mine : MonoBehaviour
     /// а список нужен чистым уже сейчас.
     public static void Forget() => All.Clear();
 
+    /// Мина по сетевому номеру.
+    public static Mine Find(int id)
+    {
+        for (int i = 0; i < All.Count; i++)
+            if (All[i] != null && All[i].NetId == id) return All[i];
+        return null;
+    }
+
     public static Mine Drop(Weapon w, Vector2 pos)
+    {
+        // У сетевого клиента мина не закладывается: его снаряд — картинка,
+        // а мина остаётся на карте и решает урон. Свою он получит объявлением.
+        if (NetProps.Mirror) return null;
+
+        var m = Make(NetProps.NextId(), w, pos);
+        NetProps.Spawned(NetProp.Mine, m.NetId, pos);
+        return m;
+    }
+
+    /// Мина, объявленная хостом: своей жизни у неё нет — ни взвода, ни
+    /// отсчёта, — она ждёт слова хоста и до тех пор просто лежит.
+    public static Mine Net(int id, Vector2 pos)
+    {
+        var m = Make(id, WildPayload(), pos);
+        NetProps.Seen(id);
+        return m;
+    }
+
+    static Mine Make(int id, Weapon w, Vector2 pos)
     {
         var go = new GameObject("Mine");
         GameManager.Attach(go);
@@ -46,6 +78,7 @@ public class Mine : MonoBehaviour
         rb.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
 
         var m = go.AddComponent<Mine>();
+        m.NetId = id;
         m._weapon = w;
         m._sr = sr;
         return m;
@@ -57,6 +90,7 @@ public class Mine : MonoBehaviour
     public static Mine Scatter(Vector2 pos)
     {
         var m = Drop(WildPayload(), pos);
+        if (m == null) return null;
         m._arm = 0.6f;
         m.name = "WildMine";
         return m;
@@ -79,11 +113,15 @@ public class Mine : MonoBehaviour
     void Update()
     {
         if (GameManager.I == null) return;
+        // У клиента мина не живёт своей жизнью: ни взвода, ни отсчёта, ни
+        // воды. Всё, что с ней случится, объявит хост.
+        if (NetProps.Mirror) return;
 
         // Мина в воде бесполезна и невидима — топим её, как ящик.
         if (transform.position.y < DestructibleTerrain.WaterLevel)
         {
             Fx.Splash(new Vector2(transform.position.x, DestructibleTerrain.WaterLevel));
+            NetProps.Gone(NetProp.Mine, NetId, PropGone.Sunk, transform.position, 0f);
             All.Remove(this);
             Destroy(gameObject);
             return;
@@ -120,7 +158,7 @@ public class Mine : MonoBehaviour
     /// Вместо этого запускаем короткий отсчёт — цепочка идёт волной.
     public void Chain()
     {
-        if (_spent) return;
+        if (_spent || NetProps.Mirror) return;
         _arm = 0f;
         if (_countdown < 0f || _countdown > ChainDelay) _countdown = ChainDelay;
     }
@@ -133,6 +171,26 @@ public class Mine : MonoBehaviour
         var pos = transform.position;
         All.Remove(this);
         Destroy(gameObject);
+        NetProps.Gone(NetProp.Mine, NetId, PropGone.Blown, pos, _weapon.BlastRadius);
         Combat.Detonate(pos, _weapon.BlastRadius, _weapon.Damage);
+    }
+
+    /// Убрать мину по слову хоста: воронку и урон клиент получит отдельно.
+    public void NetRemove(PropGone why, float radius)
+    {
+        if (_spent) return;
+        _spent = true;
+        Vector2 pos = transform.position;
+        All.Remove(this);
+        Destroy(gameObject);
+        NetProps.PlayGone(why, pos, radius);
+    }
+
+    /// Тихо убрать по сверке.
+    public void NetVanish()
+    {
+        _spent = true;
+        All.Remove(this);
+        Destroy(gameObject);
     }
 }

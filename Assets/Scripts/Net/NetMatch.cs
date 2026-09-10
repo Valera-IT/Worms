@@ -7,8 +7,8 @@ public enum NetEvent : byte
     Blast = 1,    // воронка от взрыва
     Dig,          // прогрызенный коридор бура
     Beam,         // поставленная балка
-    CrateDrop,    // ящик с припасами упал в точке
-    CrateGone,    // ящик подобрали или он взорвался
+    PropSpawn,    // на карте появился ящик, мина или бочка
+    PropGone,     // ящик, мину или бочку убрали с карты
     GameOver      // бой окончен, вот победитель
 }
 
@@ -278,6 +278,8 @@ public class NetMatch
             }
         }
 
+        WriteProps(ref w);
+
         if (peer < 0) _net.SendAll(ref w, NetChannel.Reliable);
         else _net.SendTo(peer, ref w, NetChannel.Reliable);
     }
@@ -339,6 +341,8 @@ public class NetMatch
                 if (t < gm.Teams.Count) gm.Teams[t].Ammo[kind] = left;
             }
         }
+
+        ApplyProps(ref r);
         NetSim.Applying = false;
     }
 
@@ -391,51 +395,253 @@ public class NetMatch
         w.U8(op.C.r); w.U8(op.C.g); w.U8(op.C.b);
     }
 
+    /// Событие читается по-разному в зависимости от рода: у разрушений
+    /// ландшафта своя раскладка полей, у предметов — своя. Одна общая на всех
+    /// была бы короче в коде и вдвое длиннее по проводу.
     void ApplyEvent(ref NetReader r)
     {
         var kind = (NetEvent)r.U8();
-        var a = r.Vec();
-        var b = r.Vec();
-        float radius = r.Coord();
-        float angle = r.Angle();
-        var color = new Color32(r.U8(), r.U8(), r.U8(), 255);
-        if (!r.Ok) return;
-
-        var terrain = Gm != null ? Gm.Terrain : null;
 
         NetSim.Applying = true;
         switch (kind)
         {
             case NetEvent.Blast:
-                if (terrain != null) terrain.Explode(a, radius);
-                break;
             case NetEvent.Dig:
-                if (terrain != null) terrain.Dig(a, b, radius);
-                break;
             case NetEvent.Beam:
-                if (terrain != null) terrain.StampBeam(a, angle, b.x, b.y, color);
+                ApplyTerrainOp(kind, ref r);
                 break;
-            case NetEvent.CrateDrop:
-                Crate.Drop((CrateKind)Mathf.RoundToInt(b.x), a.x);
+            case NetEvent.PropSpawn:
+                ApplyPropSpawn(ref r);
+                break;
+            case NetEvent.PropGone:
+                ApplyPropGone(ref r);
                 break;
         }
         NetSim.Applying = false;
     }
 
-    /// Хост объявляет о сброшенном ящике: сам сброс — бросок случайных чисел,
-    /// и повторить его у клиента нечем.
-    public void SendCrateDrop(CrateKind kind, float x)
+    void ApplyTerrainOp(NetEvent kind, ref NetReader r)
+    {
+        var a = r.Vec();
+        var b = r.Vec();
+        float radius = r.Coord();
+        float angle = r.Angle();
+        var color = new Color32(r.U8(), r.U8(), r.U8(), 255);
+        var terrain = Gm != null ? Gm.Terrain : null;
+        if (!r.Ok || terrain == null) return;
+
+        switch (kind)
+        {
+            case NetEvent.Blast: terrain.Explode(a, radius); break;
+            case NetEvent.Dig: terrain.Dig(a, b, radius); break;
+            case NetEvent.Beam: terrain.StampBeam(a, angle, b.x, b.y, color); break;
+        }
+    }
+
+    // --- предметы на карте --------------------------------------------------
+
+    /// Ящики, мины и бочки в сверке. Объявлениями они уже ездят по одному, но
+    /// объявление слышит только тот, кто был на связи: вошедшему посреди боя
+    /// нужен весь список целиком, а разошедшемуся — повод сойтись обратно.
+    ///
+    /// Ящик едет с начинкой: род и оружие внутри бросает кубик хоста, и
+    /// повторить этот бросок у клиента нечем. Мине и бочке хватает места:
+    /// мина у клиента всё равно только лежит, а бочка только стоит.
+    void WriteProps(ref NetWriter w)
+    {
+        int crates = Mathf.Min(Crate.All.Count, 255);
+        w.U8((byte)crates);
+        for (int i = 0; i < crates; i++)
+        {
+            var c = Crate.All[i];
+            w.U16((ushort)(c != null ? c.NetId : 0));
+            w.U8((byte)(c != null ? (int)c.Kind : 0));
+            w.U8((byte)(c != null ? (int)c.AmmoKind : 0));
+            w.Vec(c != null ? (Vector2)c.transform.position : Vector2.zero);
+            w.Bool(c != null && c.Landed);
+        }
+
+        int mines = Mathf.Min(Mine.All.Count, 255);
+        w.U8((byte)mines);
+        for (int i = 0; i < mines; i++)
+        {
+            var m = Mine.All[i];
+            w.U16((ushort)(m != null ? m.NetId : 0));
+            w.Vec(m != null ? (Vector2)m.transform.position : Vector2.zero);
+        }
+
+        int barrels = Mathf.Min(Barrel.All.Count, 255);
+        w.U8((byte)barrels);
+        for (int i = 0; i < barrels; i++)
+        {
+            var b = Barrel.All[i];
+            w.U16((ushort)(b != null ? b.NetId : 0));
+            w.Vec(b != null ? (Vector2)b.transform.position : Vector2.zero);
+        }
+    }
+
+    /// Список хоста — истина: чего в нём нет, того на карте нет, а чего нет у
+    /// нас, то заводим. Старые снимки без хвоста с предметами читаются как
+    /// пустой хвост и карту не трогают: r.Ok станет false на первом же
+    /// недочитанном байте, и мы выходим, ничего не тронув.
+    static readonly List<int> _seen = new List<int>();
+
+    void ApplyProps(ref NetReader r)
+    {
+        int crates = r.U8();
+        if (!r.Ok) return;
+        _seen.Clear();
+        for (int i = 0; i < crates; i++)
+        {
+            int id = r.U16();
+            var kind = (CrateKind)r.U8();
+            var ammo = (WeaponKind)r.U8();
+            var pos = r.Vec();
+            bool landed = r.Bool();
+            if (!r.Ok) return;
+            _seen.Add(id);
+
+            var c = Crate.Find(id);
+            if (c == null) Crate.Net(id, kind, ammo, pos, landed);
+            else Settle(c.transform, pos);
+        }
+        for (int i = Crate.All.Count - 1; i >= 0; i--)
+        {
+            var c = Crate.All[i];
+            if (c != null && !_seen.Contains(c.NetId)) c.NetVanish();
+        }
+
+        int mines = r.U8();
+        if (!r.Ok) return;
+        _seen.Clear();
+        for (int i = 0; i < mines; i++)
+        {
+            int id = r.U16();
+            var pos = r.Vec();
+            if (!r.Ok) return;
+            _seen.Add(id);
+
+            var m = Mine.Find(id);
+            if (m == null) Mine.Net(id, pos);
+            else Settle(m.transform, pos);
+        }
+        for (int i = Mine.All.Count - 1; i >= 0; i--)
+        {
+            var m = Mine.All[i];
+            if (m != null && !_seen.Contains(m.NetId)) m.NetVanish();
+        }
+
+        int barrels = r.U8();
+        if (!r.Ok) return;
+        _seen.Clear();
+        for (int i = 0; i < barrels; i++)
+        {
+            int id = r.U16();
+            var pos = r.Vec();
+            if (!r.Ok) return;
+            _seen.Add(id);
+
+            var b = Barrel.Find(id);
+            if (b == null) Barrel.Net(id, pos);
+            else Settle(b.transform, pos);
+        }
+        for (int i = Barrel.All.Count - 1; i >= 0; i--)
+        {
+            var b = Barrel.All[i];
+            if (b != null && !_seen.Contains(b.NetId)) b.NetVanish();
+        }
+    }
+
+    /// Предмет на своё место. Порог грубее червячьего: ящик под парашютом и
+    /// бочка на склоне и так съезжают, а дёргать их каждый ход на сантиметр
+    /// значит показывать сеть там, где её не должно быть видно.
+    static void Settle(Transform t, Vector2 pos)
+    {
+        if (Vector2.Distance(t.position, pos) > 0.5f) t.position = new Vector3(pos.x, pos.y, 0f);
+    }
+
+    /// Хост объявляет появившийся предмет: сброшенный ящик, заложенную мину,
+    /// расставленную перед боем бочку. Сам сброс — бросок случайных чисел, и
+    /// повторить его у клиента нечем.
+    public void SendPropSpawn(NetProp kind, int id, Vector2 pos, int a, int b)
     {
         if (!_net.IsHost) return;
-        var w = new NetWriter(24);
+        var w = new NetWriter(16);
         w.U8((byte)NetMsg.Event);
-        w.U8((byte)NetEvent.CrateDrop);
-        w.Vec(new Vector2(x, 0f));
-        w.Vec(new Vector2((int)kind, 0f));
-        w.Coord(0f);
-        w.Angle(0f);
-        w.U8(0); w.U8(0); w.U8(0);
+        w.U8((byte)NetEvent.PropSpawn);
+        w.U8((byte)kind);
+        w.U16((ushort)id);
+        w.Vec(pos);
+        w.U8((byte)a);
+        w.U8((byte)b);
         _net.SendAll(ref w, NetChannel.Reliable);
+    }
+
+    /// Хост объявляет ушедший предмет: подобрали, взорвали или утопили.
+    public void SendPropGone(NetProp kind, int id, PropGone why, Vector2 pos, float radius)
+    {
+        if (!_net.IsHost) return;
+        var w = new NetWriter(16);
+        w.U8((byte)NetMsg.Event);
+        w.U8((byte)NetEvent.PropGone);
+        w.U8((byte)kind);
+        w.U16((ushort)id);
+        w.U8((byte)why);
+        w.Vec(pos);
+        w.Coord(radius);
+        _net.SendAll(ref w, NetChannel.Reliable);
+    }
+
+    void ApplyPropSpawn(ref NetReader r)
+    {
+        var kind = (NetProp)r.U8();
+        int id = r.U16();
+        var pos = r.Vec();
+        int a = r.U8();
+        int b = r.U8();
+        if (!r.Ok || Gm == null || Gm.Terrain == null) return;
+
+        switch (kind)
+        {
+            case NetProp.Crate:
+                if (Crate.Find(id) == null) Crate.Net(id, (CrateKind)a, (WeaponKind)b, pos, false);
+                break;
+            case NetProp.Mine:
+                if (Mine.Find(id) == null) Mine.Net(id, pos);
+                break;
+            case NetProp.Barrel:
+                if (Barrel.Find(id) == null) Barrel.Net(id, pos);
+                break;
+        }
+    }
+
+    void ApplyPropGone(ref NetReader r)
+    {
+        var kind = (NetProp)r.U8();
+        int id = r.U16();
+        var why = (PropGone)r.U8();
+        var pos = r.Vec();
+        float radius = r.Coord();
+        if (!r.Ok) return;
+
+        switch (kind)
+        {
+            case NetProp.Crate:
+                var c = Crate.Find(id);
+                if (c != null) c.NetRemove(why, radius);
+                else NetProps.PlayGone(why, pos, radius);
+                break;
+            case NetProp.Mine:
+                var m = Mine.Find(id);
+                if (m != null) m.NetRemove(why, radius);
+                else NetProps.PlayGone(why, pos, radius);
+                break;
+            case NetProp.Barrel:
+                var b = Barrel.Find(id);
+                if (b != null) b.NetRemove(why, radius);
+                else NetProps.PlayGone(why, pos, radius);
+                break;
+        }
     }
 
     // --- приём -------------------------------------------------------------

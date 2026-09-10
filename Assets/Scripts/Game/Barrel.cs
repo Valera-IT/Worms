@@ -24,6 +24,10 @@ public class Barrel : MonoBehaviour
     static readonly Color Iron = new Color(0.55f, 0.32f, 0.16f);
     static readonly Color Band = new Color(0.30f, 0.18f, 0.09f);
 
+    /// Номер бочки в сетевом бою: по нему хост объявляет, что рванула именно
+    /// эта. В одиночном бою номер не значит ничего.
+    public int NetId { get; private set; }
+
     float _armor = Armor;
     bool _burning;
     bool _spent;
@@ -36,15 +40,44 @@ public class Barrel : MonoBehaviour
 
     public static void Forget() => All.Clear();
 
+    /// Бочка по сетевому номеру.
+    public static Barrel Find(int id)
+    {
+        for (int i = 0; i < All.Count; i++)
+            if (All[i] != null && All[i].NetId == id) return All[i];
+        return null;
+    }
+
     public static Barrel Place(Vector2 pos)
+    {
+        // У сетевого клиента бочки не расставляются: их место и число решает
+        // хост, он же их и объявляет.
+        if (NetProps.Mirror) return null;
+
+        // Чуть приподнимаем: точка раскладки лежит на поверхности, и бочка
+        // родилась бы наполовину в породе.
+        var b = Make(NetProps.NextId(), new Vector2(pos.x, pos.y + 0.35f));
+        NetProps.Spawned(NetProp.Barrel, b.NetId, b.transform.position);
+        return b;
+    }
+
+    /// Бочка, объявленная хостом: место и номер назначил он, а гореть и
+    /// рваться она сама не станет.
+    public static Barrel Net(int id, Vector2 pos)
+    {
+        var b = Make(id, pos);
+        NetProps.Seen(id);
+        return b;
+    }
+
+    static Barrel Make(int id, Vector2 pos)
     {
         var go = new GameObject("Barrel");
         GameManager.Attach(go);
-        // Чуть приподнимаем: точка раскладки лежит на поверхности, и бочка
-        // родилась бы наполовину в породе.
-        go.transform.position = new Vector3(pos.x, pos.y + 0.35f, 0f);
+        go.transform.position = new Vector3(pos.x, pos.y, 0f);
 
         var b = go.AddComponent<Barrel>();
+        b.NetId = id;
         b._gen = GameManager.I != null ? GameManager.I.Generation : 0;
         b.Build();
         return b;
@@ -75,11 +108,15 @@ public class Barrel : MonoBehaviour
     void Update()
     {
         if (GameManager.I == null || GameManager.I.Generation != _gen) return;
+        // У клиента бочка не горит и не тонет сама: фитиль зажигает хост,
+        // он же объявляет и взрыв.
+        if (NetProps.Mirror) return;
 
         if (transform.position.y < DestructibleTerrain.WaterLevel)
         {
             Fx.Splash(new Vector2(transform.position.x, DestructibleTerrain.WaterLevel));
             Sfx.Splash();
+            NetProps.Gone(NetProp.Barrel, NetId, PropGone.Sunk, transform.position, 0f);
             All.Remove(this);
             Destroy(gameObject);
             return;
@@ -98,7 +135,7 @@ public class Barrel : MonoBehaviour
     /// поэтому железо считается тем же уроном, а не отдельным «задело или нет».
     public void Hit(float damage)
     {
-        if (_spent || _burning) return;
+        if (_spent || _burning || NetProps.Mirror) return;
         _armor -= damage;
         if (_armor > 0f)
         {
@@ -127,8 +164,36 @@ public class Barrel : MonoBehaviour
 
         // Нефть: к обычному взрыву добавляем брызги пламени — по ним видно,
         // что рвануло не железо, а то, что внутри.
+        NetProps.Gone(NetProp.Barrel, NetId, PropGone.Blown, pos, BlastRadius);
         Combat.Detonate(pos, BlastRadius, BlastDamage);
+        Oil(pos);
+    }
+
+    /// Нефть на месте взрыва: брызги пламени и дым. У клиента взрыв ставит
+    /// объявление хоста, но нефть в нём та же самая.
+    static void Oil(Vector2 pos)
+    {
         Fx.Splash(pos, new Color(1f, 0.6f, 0.15f), 16, 0.35f);
         Fx.Smoke(pos, 1.6f);
+    }
+
+    /// Убрать бочку по слову хоста: воронку и урон клиент получит отдельно.
+    public void NetRemove(PropGone why, float radius)
+    {
+        if (_spent) return;
+        _spent = true;
+        Vector2 pos = transform.position;
+        All.Remove(this);
+        Destroy(gameObject);
+        NetProps.PlayGone(why, pos, radius);
+        if (why == PropGone.Blown) Oil(pos);
+    }
+
+    /// Тихо убрать по сверке.
+    public void NetVanish()
+    {
+        _spent = true;
+        All.Remove(this);
+        Destroy(gameObject);
     }
 }

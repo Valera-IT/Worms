@@ -15,18 +15,9 @@ public static class Combat
     public static void Detonate(Vector2 pos, float radius, float damage, bool soft = false)
     {
         GameManager.I.Terrain.Explode(pos, radius);
-        Fx.Explosion(pos, radius, soft);
+        Boom(pos, radius, soft);
         // Итог выстрела бота: первый взрыв после нажатия на спуск — его.
         BotMemory.NoteBlast(pos);
-        if (!soft)
-        {
-            Sfx.Explosion(radius);
-            GameManager.I.Cam.Shake(Mathf.Clamp(radius * 0.22f, 0.15f, 1.2f));
-            // Даём досмотреть эффект: вспышка проходит за три кадра (~0,18 с),
-            // обломки живут до 1,1 с, дым — до полутора секунд.
-            // Чем крупнее воронка, тем дольше пауза; цепные взрывы окно продлевают.
-            GameManager.I.Cam.Hold(pos, Mathf.Clamp(0.9f + radius * 0.15f, 1.1f, 2f));
-        }
 
         var worms = GameManager.I.AllWorms();
         for (int i = 0; i < worms.Count; i++)
@@ -81,5 +72,23 @@ public static class Combat
         if (chained == null) return;
         for (int i = 0; i < chained.Length; i++)
             if (chained[i] != null) chained[i].Blow();
+    }
+
+    /// Видимая половина взрыва: вспышка, звук, тряска и задержка камеры — всё,
+    /// что не меняет мир. Отдельно от Detonate она нужна сетевому клиенту:
+    /// воронку и урон ему присылает хост, а показать взрыв бочки или мины он
+    /// обязан сам — иначе яма появлялась бы в тишине.
+    public static void Boom(Vector2 pos, float radius, bool soft = false)
+    {
+        Fx.Explosion(pos, radius, soft);
+        if (soft) return;
+
+        Sfx.Explosion(radius);
+        if (GameManager.I == null || GameManager.I.Cam == null) return;
+        GameManager.I.Cam.Shake(Mathf.Clamp(radius * 0.22f, 0.15f, 1.2f));
+        // Даём досмотреть эффект: вспышка проходит за три кадра (~0,18 с),
+        // обломки живут до 1,1 с, дым — до полутора секунд.
+        // Чем крупнее воронка, тем дольше пауза; цепные взрывы окно продлевают.
+        GameManager.I.Cam.Hold(pos, Mathf.Clamp(0.9f + radius * 0.15f, 1.1f, 2f));
     }
 }

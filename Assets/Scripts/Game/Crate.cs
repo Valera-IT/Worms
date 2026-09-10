@@ -18,10 +18,18 @@ public class Crate : MonoBehaviour
 
     public CrateKind Kind { get; private set; }
 
+    /// Номер ящика в сетевом бою: по нему хост объявляет, что этот самый ящик
+    /// подобрали или взорвали. В одиночном бою номер не значит ничего.
+    public int NetId { get; private set; }
+
     /// Что именно внутри: для Ammo — какое оружие, для Health — сколько здоровья.
     public WeaponKind AmmoKind { get; private set; }
     public int AmmoAmount { get; private set; } = 2;
     public float HealAmount { get; private set; } = 25f;
+
+    /// Ящик уже на земле: в сверке это едет вместе с местом, иначе у
+    /// вошедшего посреди боя лежащий ящик снова висел бы на парашюте.
+    public bool Landed => _landed;
 
     Rigidbody2D _rb;
     Transform _canopy;
@@ -39,6 +47,15 @@ public class Crate : MonoBehaviour
     /// Забыть всё разом — при пересборке мира объекты умирают отложенно,
     /// а список нужен чистым уже сейчас.
     public static void Forget() => All.Clear();
+
+    /// Ящик по сетевому номеру. Ящиков на карте не больше четырёх, поэтому
+    /// перебор дешевле словаря, который пришлось бы чистить.
+    public static Crate Find(int id)
+    {
+        for (int i = 0; i < All.Count; i++)
+            if (All[i] != null && All[i].NetId == id) return All[i];
+        return null;
+    }
 
     // --- появление ---------------------------------------------------------
 
@@ -80,26 +97,52 @@ public class Crate : MonoBehaviour
 
     public static Crate Drop(CrateKind kind, float x)
     {
-        var go = new GameObject("Crate");
-        GameManager.Attach(go);
-        go.transform.position = new Vector3(x, DropHeight(x), 0f);
+        // У сетевого клиента ящики не заводятся сами: и место, и начинку
+        // бросает кубик, а два кубика в разных процессах — это два разных
+        // ящика. Свой придёт объявлением от хоста.
+        if (NetProps.Mirror) return null;
 
-        var c = go.AddComponent<Crate>();
-        c.Kind = kind;
-        c._gen = GameManager.I != null ? GameManager.I.Generation : 0;
-
+        var ammo = default(WeaponKind);
         if (kind != CrateKind.Health)
         {
             var pool = Pool(kind == CrateKind.Utility);
             // Пустой набор возможен только при безлимитном боезапасе: тогда
             // ящик всё равно отдаст здоровьем, а метка нужна хоть какая-то.
-            c.AmmoKind = pool.Count > 0
+            ammo = pool.Count > 0
                 ? pool[Random.Range(0, pool.Count)]
                 : (kind == CrateKind.Utility ? WeaponKind.Rope : WeaponKind.Cluster);
         }
 
-        c.Build();
+        var c = Make(NetProps.NextId(), kind, ammo, new Vector2(x, DropHeight(x)));
         Sfx.CrateDrop();
+        NetProps.Spawned(NetProp.Crate, c.NetId, c.transform.position, (int)kind, (int)ammo);
+        return c;
+    }
+
+    /// Ящик, объявленный хостом: место, номер и начинку назначил он, кубик
+    /// здесь не бросается вовсе. landed — ящик уже на земле: так приезжают
+    /// ящики в сверке, а свежесброшенный ещё висит на парашюте.
+    public static Crate Net(int id, CrateKind kind, WeaponKind ammo, Vector2 pos, bool landed)
+    {
+        var c = Make(id, kind, ammo, pos);
+        NetProps.Seen(id);
+        if (landed) c.Touchdown();
+        else Sfx.CrateDrop();
+        return c;
+    }
+
+    static Crate Make(int id, CrateKind kind, WeaponKind ammo, Vector2 pos)
+    {
+        var go = new GameObject("Crate");
+        GameManager.Attach(go);
+        go.transform.position = new Vector3(pos.x, pos.y, 0f);
+
+        var c = go.AddComponent<Crate>();
+        c.NetId = id;
+        c.Kind = kind;
+        c.AmmoKind = ammo;
+        c._gen = GameManager.I != null ? GameManager.I.Generation : 0;
+        c.Build();
         return c;
     }
 
@@ -183,10 +226,16 @@ public class Crate : MonoBehaviour
     {
         if (GameManager.I == null || GameManager.I.Generation != _gen) return;
 
+        // Утонуть ящик может только у того, кто считает бой: у клиента он
+        // ждёт объявления, иначе один ящик утонул бы дважды по разным часам.
+        if (NetProps.Mirror) return;
+
         if (transform.position.y < DestructibleTerrain.WaterLevel)
         {
             Fx.Splash(new Vector2(transform.position.x, DestructibleTerrain.WaterLevel));
             Sfx.Splash();
+            NetProps.Gone(NetProp.Crate, NetId, PropGone.Sunk, transform.position, 0f);
+            All.Remove(this);
             Destroy(gameObject);
         }
     }
@@ -196,10 +245,19 @@ public class Crate : MonoBehaviour
         var worm = c.collider.GetComponent<Worm>();
         if (worm != null) { Take(worm); return; }
 
+        Touchdown();
+    }
+
+    /// Приземление: парашют отстёгивается, ящик становится обычным телом.
+    void Touchdown()
+    {
         if (_landed) return;
         _landed = true;
-        _rb.gravityScale = 1f;
-        _rb.linearDamping = 0f;
+        if (_rb != null)
+        {
+            _rb.gravityScale = 1f;
+            _rb.linearDamping = 0f;
+        }
         if (_canopy != null) Destroy(_canopy.gameObject);
     }
 
@@ -208,6 +266,9 @@ public class Crate : MonoBehaviour
     void Take(Worm worm)
     {
         if (_taken || worm == null || worm.IsDead) return;
+        // Подбор — это здоровье и патроны, то есть состояние боя. Клиент его
+        // не решает: хост объявит подобранный ящик, и тогда он исчезнет.
+        if (NetProps.Mirror) return;
         _taken = true;
 
         if (Kind == CrateKind.Health || worm.Team == null)
@@ -236,6 +297,8 @@ public class Crate : MonoBehaviour
         }
 
         Sfx.Pickup();
+        NetProps.Gone(NetProp.Crate, NetId, PropGone.Taken, transform.position, 0f);
+        All.Remove(this);
         Destroy(gameObject);
     }
 
@@ -244,11 +307,36 @@ public class Crate : MonoBehaviour
     public void Blow()
     {
         if (_taken) return;
+        // Цепочка у клиента идёт своим счётом и разойдётся с хостовой: у него
+        // ящик рвёт только объявление хоста.
+        if (NetProps.Mirror) return;
         _taken = true;
 
         Vector2 pos = transform.position;
         All.Remove(this);
         Destroy(gameObject);
+        NetProps.Gone(NetProp.Crate, NetId, PropGone.Blown, pos, BlastRadius);
         Combat.Detonate(pos, BlastRadius, BlastDamage);
+    }
+
+    /// Убрать ящик по слову хоста. Урон и воронку клиент получит отдельно —
+    /// здесь только сам ящик и то, что видно на его месте.
+    public void NetRemove(PropGone why, float radius)
+    {
+        if (_taken) return;
+        _taken = true;
+        Vector2 pos = transform.position;
+        All.Remove(this);
+        Destroy(gameObject);
+        NetProps.PlayGone(why, pos, radius);
+    }
+
+    /// Тихо убрать по сверке: показывать нечего — либо всё уже показано
+    /// объявлением, либо этого ящика не стало, пока нас не было.
+    public void NetVanish()
+    {
+        _taken = true;
+        All.Remove(this);
+        Destroy(gameObject);
     }
 }

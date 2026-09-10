@@ -146,7 +146,7 @@ public partial class MenuUI : MonoBehaviour
         // Первая строка белая, остальные бирюзовые — как в оригинале.
         column.Add(MenuTheme.Item("НАЧАТЬ БОЙ", () => App.I.StartMatch(MatchConfig.QuickFight())));
         column.Add(MenuTheme.Item("ВЫБОР РЕЖИМА", () => Set(BuildModeSelect), MenuTheme.Accent));
-        column.Add(MenuTheme.Item("НАСТРОЙКА МАТЧА", () => { App.I.Draft = MatchConfig.Setup(); Set(BuildMatchSetup); }, MenuTheme.Accent));
+        column.Add(MenuTheme.Item("НАСТРОЙКА МАТЧА", () => ShowMatchSetup(BuildModeSelect), MenuTheme.Accent));
         column.Add(MenuTheme.Item("НАСТРОЙКИ!", () => OpenSettings(BuildMain), MenuTheme.Accent));
         column.Add(MenuTheme.Item("ОБ ИГРЕ!", () => Set(BuildAbout), MenuTheme.Accent));
         if (Application.platform != RuntimePlatform.IPhonePlayer)
@@ -177,12 +177,27 @@ public partial class MenuUI : MonoBehaviour
         body.Add(MenuTheme.Button("Хотсит — двое за одним устройством",
             () => App.I.StartMatch(MatchConfig.Hotseat())));
         body.Add(MenuTheme.Button("Сетевая игра — по коду комнаты", () => Set(BuildNetHome)));
-        body.Add(MenuTheme.Button("Настройка матча", () => { App.I.Draft = MatchConfig.Setup(); Set(BuildMatchSetup); }));
+        body.Add(MenuTheme.Button("Настройка матча", () => ShowMatchSetup(BuildModeSelect)));
 
         var back = MenuTheme.Button("Назад", () => Set(BuildMain));
         back.style.marginTop = 18;
         body.Add(back);
         _root.Add(layer);
+    }
+
+    /// Куда возвращает «Назад» из настройки матча. Из меню — в «Режим», из
+    /// комнаты — обратно в комнату: хосту нужно поправить карту и время хода,
+    /// не закрывая комнату собой.
+    Action _setupBack;
+
+    /// Открыть настройку матча. Черновик берём готовый, если он уже есть:
+    /// хост, зашедший сюда из комнаты, правит те самые настройки, с которыми
+    /// начнёт бой, а не свежие умолчания.
+    void ShowMatchSetup(Action back, bool keepDraft = false)
+    {
+        _setupBack = back;
+        if (!keepDraft || App.I.Draft == null) App.I.Draft = MatchConfig.Setup();
+        Set(BuildMatchSetup);
     }
 
     void BuildMatchSetup()
@@ -239,10 +254,22 @@ public partial class MenuUI : MonoBehaviour
         body.Add(MenuTheme.Note("Потоп поднимает воду каждый ход, и черви внизу тонут."));
         body.Add(MenuTheme.Note("«Случайный» выбирает тип из сида карты — «Новая карта» в паузе даёт другой мир."));
 
-        var go = MenuTheme.Button("Начать бой", () => App.I.StartMatch(cfg.Clone()));
-        go.style.marginTop = 16;
-        body.Add(go);
-        body.Add(MenuTheme.Button("Назад", () => Set(BuildModeSelect)));
+        // Из комнаты бой начинается в комнате — когда все отметились
+        // готовыми, а не отсюда: здесь про остальных ничего не известно.
+        bool inRoom = NetGame.I != null && NetGame.I.Online && NetGame.I.Phase == NetPhase.Lobby;
+        if (inRoom)
+        {
+            body.Add(MenuTheme.Note("Эти настройки уедут всем, когда вы начнёте бой из комнаты."));
+        }
+        else
+        {
+            var go = MenuTheme.Button("Начать бой", () => App.I.StartMatch(cfg.Clone()));
+            go.style.marginTop = 16;
+            body.Add(go);
+        }
+
+        var backAction = _setupBack ?? BuildModeSelect;
+        body.Add(MenuTheme.Button("Назад", () => Set(backAction)));
         _root.Add(layer);
     }
 
