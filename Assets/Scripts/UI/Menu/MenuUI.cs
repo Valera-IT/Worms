@@ -5,7 +5,7 @@ using UnityEngine.UIElements;
 /// Экраны меню на UI Toolkit: главное, выбор режима, настройка матча, настройки,
 /// пауза, итоги. Панель и документ создаются в рантайме без ассетов — как HUD.
 /// Логику переходов держит App, здесь только отрисовка и вызовы назад в App.
-public class MenuUI : MonoBehaviour
+public partial class MenuUI : MonoBehaviour
 {
     const int RefW = 1920, RefH = 1080;
 
@@ -145,6 +145,7 @@ public class MenuUI : MonoBehaviour
 
         // Первая строка белая, остальные бирюзовые — как в оригинале.
         column.Add(MenuTheme.Item("НАЧАТЬ БОЙ", () => App.I.StartMatch(MatchConfig.QuickFight())));
+        column.Add(MenuTheme.Item("ВЫБОР РЕЖИМА", () => Set(BuildModeSelect), MenuTheme.Accent));
         column.Add(MenuTheme.Item("НАСТРОЙКА МАТЧА", () => { App.I.Draft = MatchConfig.Setup(); Set(BuildMatchSetup); }, MenuTheme.Accent));
         column.Add(MenuTheme.Item("НАСТРОЙКИ!", () => OpenSettings(BuildMain), MenuTheme.Accent));
         column.Add(MenuTheme.Item("ОБ ИГРЕ!", () => Set(BuildAbout), MenuTheme.Accent));
@@ -175,6 +176,7 @@ public class MenuUI : MonoBehaviour
 
         body.Add(MenuTheme.Button("Хотсит — двое за одним устройством",
             () => App.I.StartMatch(MatchConfig.Hotseat())));
+        body.Add(MenuTheme.Button("Сетевая игра — по коду комнаты", () => Set(BuildNetHome)));
         body.Add(MenuTheme.Button("Настройка матча", () => { App.I.Draft = MatchConfig.Setup(); Set(BuildMatchSetup); }));
 
         var back = MenuTheme.Button("Назад", () => Set(BuildMain));
@@ -223,12 +225,17 @@ public class MenuUI : MonoBehaviour
             () => cfg.Crates = (CratePlan)Wrap((int)cfg.Crates - 1, 4),
             () => cfg.Crates = (CratePlan)Wrap((int)cfg.Crates + 1, 4)));
 
+        body.Add(MenuTheme.Stepper("Мины и бочки", () => ScatterName(cfg.Scatter),
+            () => cfg.Scatter = (ScatterPlan)Wrap((int)cfg.Scatter - 1, 4),
+            () => cfg.Scatter = (ScatterPlan)Wrap((int)cfg.Scatter + 1, 4)));
+
         body.Add(MenuTheme.Stepper("Потоп",
             () => cfg.FloodRound <= 0 ? "выкл" : "с " + cfg.FloodRound + " раунда",
             () => cfg.FloodRound = Mathf.Clamp(cfg.FloodRound - 1, 0, 30),
             () => cfg.FloodRound = Mathf.Clamp(cfg.FloodRound + 1, 0, 30)));
 
         body.Add(MenuTheme.Note("Ботов не больше, чем команд; когда их поровну — все команды под ботом."));
+        body.Add(MenuTheme.Note("Мины и бочки лежат на карте с начала боя: мина рвётся под ногами, бочка — от попадания."));
         body.Add(MenuTheme.Note("Потоп поднимает воду каждый ход, и черви внизу тонут."));
         body.Add(MenuTheme.Note("«Случайный» выбирает тип из сида карты — «Новая карта» в паузе даёт другой мир."));
 
@@ -301,7 +308,26 @@ public class MenuUI : MonoBehaviour
         body.Add(MenuTheme.Button("Продолжить", () => App.I.ResumeFromPause()));
         body.Add(MenuTheme.Button("Настройки", () => OpenSettings(BuildPause)));
         body.Add(MenuTheme.Button("Новая карта", () => App.I.NewMap()));
+        // «Сдаться» гасим, а не прячем: пропавшая из паузы строка выглядит
+        // сбоем, а погасшая объясняет себя сама — сейчас ходит бот или клиент.
+        var gm = GameManager.I;
+        body.Add(MenuTheme.Button("Сдаться", () => Set(BuildSurrender), gm != null && gm.CanSurrender));
         body.Add(MenuTheme.Button("В меню", () => App.I.ReturnToMenu()));
+        _root.Add(layer);
+    }
+
+    /// Подтверждение сдачи. Спрашиваем отдельным экраном: команда уходит с
+    /// карты насовсем, а промахнуться мимо «Новой карты» на телефоне легко.
+    void BuildSurrender()
+    {
+        var gm = GameManager.I;
+        string name = gm != null && gm.CurrentTeam >= 0 && gm.CurrentTeam < gm.Teams.Count
+                    ? gm.Teams[gm.CurrentTeam].Name : "";
+
+        var (layer, body) = MenuTheme.Sheet("Сдаться?", 560f);
+        body.Add(MenuTheme.Note("Команда «" + name + "» уйдёт с карты вся сразу, и матч сойдётся без неё."));
+        body.Add(MenuTheme.Button("Да, сдаёмся", () => App.I.Surrender()));
+        body.Add(MenuTheme.Button("Назад", () => Set(BuildPause)));
         _root.Add(layer);
     }
 
@@ -376,6 +402,14 @@ public class MenuUI : MonoBehaviour
         CratePlan.Off => "нет",
         CratePlan.Rare => "редко",
         CratePlan.Plenty => "часто",
+        _ => "обычно"
+    };
+
+    static string ScatterName(ScatterPlan p) => p switch
+    {
+        ScatterPlan.Off => "нет",
+        ScatterPlan.Few => "мало",
+        ScatterPlan.Many => "много",
         _ => "обычно"
     };
 

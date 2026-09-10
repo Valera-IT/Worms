@@ -1,7 +1,9 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-public enum CrateKind { Ammo, Health }
+/// Что внутри ящика. Оружейный и утилитный разведены с шага 14b: в оригинале
+/// это разные ящики и разная находка — ствол на ход или верёвка на побег.
+public enum CrateKind { Ammo, Health, Utility }
 
 /// Ящик с припасами: в начале хода падает с неба на парашюте, подбирается
 /// касанием любого живого червя, а от близкого взрыва детонирует сам —
@@ -29,6 +31,7 @@ public class Crate : MonoBehaviour
 
     static readonly Color AmmoColor = new Color(0.80f, 0.62f, 0.28f);
     static readonly Color HealthColor = new Color(0.92f, 0.95f, 0.96f);
+    static readonly Color UtilityColor = new Color(0.38f, 0.55f, 0.72f);
 
     void OnEnable() => All.Add(this);
     void OnDisable() => All.Remove(this);
@@ -53,7 +56,27 @@ public class Crate : MonoBehaviour
         return null;
     }
 
-    static CrateKind RollKind() => Random.value < 0.35f ? CrateKind.Health : CrateKind.Ammo;
+    /// Кубик содержимого: чаще всего оружие, треть — аптечка, пятая часть —
+    /// снаряжение. Утилитный ящик реже аптечки нарочно: верёвка и телепорт
+    /// решают позицию сильнее, чем двадцать пять очков здоровья.
+    static CrateKind RollKind()
+    {
+        float r = Random.value;
+        if (r < 0.30f) return CrateKind.Health;
+        if (r < 0.50f) return CrateKind.Utility;
+        return CrateKind.Ammo;
+    }
+
+    /// Набор, из которого ящик берёт содержимое. Бесконечное оружие в ящик
+    /// не кладём — подарок должен что-то значить, — а утилитный ящик и
+    /// оружейный делят арсенал по флагу Utility, а не по списку имён.
+    static List<WeaponKind> Pool(bool utility)
+    {
+        var pool = new List<WeaponKind>();
+        foreach (var w in Weapon.All)
+            if (w.Ammo > 0 && w.Utility == utility) pool.Add(w.Kind);
+        return pool;
+    }
 
     public static Crate Drop(CrateKind kind, float x)
     {
@@ -65,13 +88,14 @@ public class Crate : MonoBehaviour
         c.Kind = kind;
         c._gen = GameManager.I != null ? GameManager.I.Generation : 0;
 
-        if (kind == CrateKind.Ammo)
+        if (kind != CrateKind.Health)
         {
-            // Бесконечное оружие в ящик не кладём — подарок должен что-то значить.
-            var pool = new List<WeaponKind>();
-            foreach (var w in Weapon.All)
-                if (w.Ammo > 0) pool.Add(w.Kind);
-            c.AmmoKind = pool.Count > 0 ? pool[Random.Range(0, pool.Count)] : WeaponKind.Cluster;
+            var pool = Pool(kind == CrateKind.Utility);
+            // Пустой набор возможен только при безлимитном боезапасе: тогда
+            // ящик всё равно отдаст здоровьем, а метка нужна хоть какая-то.
+            c.AmmoKind = pool.Count > 0
+                ? pool[Random.Range(0, pool.Count)]
+                : (kind == CrateKind.Utility ? WeaponKind.Rope : WeaponKind.Cluster);
         }
 
         c.Build();
@@ -98,18 +122,37 @@ public class Crate : MonoBehaviour
         return y;
     }
 
+    Color BodyColor() => Kind switch
+    {
+        CrateKind.Health => HealthColor,
+        CrateKind.Utility => UtilityColor,
+        _ => AmmoColor
+    };
+
     void Build()
     {
-        var body = Sprites.Make("Box", Sprites.Square, Kind == CrateKind.Ammo ? AmmoColor : HealthColor, 9, transform);
+        var body = Sprites.Make("Box", Sprites.Square, BodyColor(), 9, transform);
         body.transform.localScale = new Vector3(0.9f, 0.9f, 1f);
 
-        // Метка содержимого: у аптечки крест, у боеприпаса — полоса цвета оружия.
+        // Метка содержимого: у аптечки крест, у снаряжения — косая скоба,
+        // у боеприпаса — полоса цвета оружия.
         if (Kind == CrateKind.Health)
         {
             var v = Sprites.Make("CrossV", Sprites.Square, new Color(0.85f, 0.2f, 0.2f), 10, transform);
             v.transform.localScale = new Vector3(0.22f, 0.6f, 1f);
             var h = Sprites.Make("CrossH", Sprites.Square, new Color(0.85f, 0.2f, 0.2f), 10, transform);
             h.transform.localScale = new Vector3(0.6f, 0.22f, 1f);
+        }
+        else if (Kind == CrateKind.Utility)
+        {
+            // Скоба: косая планка с утолщением на конце — ключ, а не полоса,
+            // чтобы утилитный ящик не путался с оружейным на пол-экрана.
+            var bar = Sprites.Make("Hook", Sprites.Square, Weapon.All[Weapon.IndexOf(AmmoKind)].Color, 10, transform);
+            bar.transform.localScale = new Vector3(0.6f, 0.16f, 1f);
+            bar.transform.localRotation = Quaternion.Euler(0f, 0f, 38f);
+            var head = Sprites.Make("Head", Sprites.Circle, Weapon.All[Weapon.IndexOf(AmmoKind)].Color, 10, transform);
+            head.transform.localPosition = new Vector3(-0.2f, -0.16f, 0f);
+            head.transform.localScale = Vector3.one * 0.28f;
         }
         else
         {

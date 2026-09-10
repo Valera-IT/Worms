@@ -140,4 +140,11 @@ public class GameInput : MonoBehaviour, IGameInput, ISystemInput
     {
         if (GameManager.I != null) GameManager.I.SelectNextWorm();
     }
+
+    /// «Пропустить ход» — кнопка HUD и только она: клавиши под это не заводим,
+    /// у клавиатуры и геймпада для того же есть таймер хода и вся карта.
+    public static void RequestSkipTurn()
+    {
+        if (GameManager.I != null) GameManager.I.SkipTurn();
+    }
 }

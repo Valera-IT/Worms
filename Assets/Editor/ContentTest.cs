@@ -15,6 +15,7 @@ public static class ContentTest
     static int _errors;
     static float _waterAtStart;
     static Crate _bomb;
+    static Crate _kit;      // аптечка, адресованная подопечному червю
     static Worm _patient;   // червь, которому адресована аптечка: ход сменится раньше подбора
     static Worm _faller;    // червь, сброшенный с высоты: он обязан разбиться
     static Worm _hopper;    // червь, поднятый на высоту прыжка: ему падение бесплатно
@@ -28,6 +29,7 @@ public static class ContentTest
     static int _gravesBefore;
     static float _swimmerHealth;
     static bool _restarted;
+    static bool _skipDone;   // пропуск хода уже проверен: он кончает ход и делается один раз
 
     [MenuItem("Worms/Тест содержимого")]
     public static void Run()
@@ -37,6 +39,7 @@ public static class ContentTest
         _step = 0;
         _errors = 0;
         _restarted = false;
+        _skipDone = false;
         _swimmer = null;
         _swimmerSet = false;
         _faller = null;
@@ -69,6 +72,10 @@ public static class ContentTest
         cfg.TurnTime = 1.2f;
         cfg.FloodRound = 4;
         cfg.Crates = CratePlan.Off;
+        // Мины и бочки, наоборот, включены: их расстановку проверяем сразу
+        // после старта, а потом убираем с карты, чтобы дикая мина не рванула
+        // под червём, которого следующие шаги двигают по всей пещере.
+        cfg.Scatter = ScatterPlan.Normal;
         return cfg;
     }
 
@@ -117,11 +124,26 @@ public static class ContentTest
             return;
         }
 
+        // Пропуск хода проверяем раньше всей цепочки и только в прицеливании:
+        // он завершает ход, и посреди толчка или парашюта мешал бы измерениям.
+        // Ждём своего прицеливания, а потом отсчитываем время заново — иначе
+        // ожидание съедало бы запас у следующих шагов, а он у них расписан.
+        if (!_skipDone)
+        {
+            if (gm.State != GameState.Aim && t < 8.0) return;
+            _skipDone = true;
+            if (gm.State == GameState.Aim) CheckSkip(gm);
+            else Fail("матч не дошёл до прицеливания за восемь секунд");
+            _start = EditorApplication.timeSinceStartup;
+            return;
+        }
+
         if (_step == 0 && t > 1.5)
         {
             _step = 1;
             CheckAudio();
             _waterAtStart = DestructibleTerrain.WaterLevel;
+            CheckScatter(gm);
             Debug.Log($"CONTENT step1: мир «{gm.Terrain.Style.Name}», ход {gm.Config.TurnTime:0.0} с, " +
                       $"потоп с раунда {gm.Config.FloodRound}, вода {_waterAtStart:0.0}");
         }
@@ -147,7 +169,8 @@ public static class ContentTest
         if (_step == 13 && t > 25.9) { _step = 14; OpenChute(gm); }
         if (_step == 14 && t > 27.2) { _step = 15; CheckChute(gm); }
         if (_step == 15 && t > 27.6) { _step = 16; LaunchHoming(gm); }
-        if (_step == 16 && t > 29.6) { _step = 17; CheckHoming(); Finish(); }
+        if (_step == 16 && t > 29.6) { _step = 17; CheckHoming(); PlantWorld(gm); }
+        if (_step == 17 && t > 31.4) { _step = 18; CheckWorldBlast(gm); Finish(); }
 
         // Расстояние до отмеченной точки меряем каждый кадр: ракета рвётся,
         // дойдя до цели, и к следующему шагу от неё уже ничего не осталось.
@@ -405,12 +428,34 @@ public static class ContentTest
             if (rms < 0.02f) { Fail($"клип {s} звучит тишиной (rms {rms:0.0000})"); silent++; }
         }
 
+        int voiceClips = 0;
+        for (int bank = 0; bank < Voice.BankCount; bank++)
+        {
+            Voice.Prewarm(bank);
+            for (int l = 0; l < 4; l++)
+                for (int v = 0; v < Voice.VariantsOf((Voice.Line)l); v++)
+                {
+                    var vc = Voice.Clip(bank, (Voice.Line)l, v);
+                    voiceClips++;
+                    string what = $"голос {Voice.Banks[bank].Name} «{Voice.Text((Voice.Line)l, v)}»";
+                    if (vc == null || vc.samples < 100) { Fail($"{what} не собран"); continue; }
+                    // Реплика длиннее секунды с небольшим — уже не реплика, а речь:
+                    // она не влезает в паузу между выстрелом и передачей хода.
+                    if (vc.length > 1.2f) Fail($"{what} длиной {vc.length:0.00} с — длиннее реплики");
+                    float vr = Rms(vc);
+                    if (vr < 0.02f) { Fail($"{what} звучит тишиной (rms {vr:0.0000})"); silent++; }
+                }
+        }
+
         var pad = Music.Build();
         float padRms = Rms(pad);
         if (pad.length < 8f) Fail("петля музыки короче восьми секунд");
         if (padRms < 0.02f) Fail($"музыка звучит тишиной (rms {padRms:0.0000})");
 
+        if (Voice.PhraseCount != 14) Fail($"фраз в банке {Voice.PhraseCount}, а обещано четырнадцать");
+
         Debug.Log($"CONTENT step1: звук — клипов {System.Enum.GetValues(typeof(Sfx.Sound)).Length}, " +
+                  $"голос — банков {Voice.BankCount} по {Voice.PhraseCount} фраз ({voiceClips} клипов), " +
                   $"немых {silent}, музыка {pad.length:0.0} с rms {padRms:0.000}");
     }
 
@@ -421,6 +466,27 @@ public static class ContentTest
         double sum = 0;
         for (int i = 0; i < data.Length; i++) sum += (double)data[i] * data[i];
         return data.Length > 0 ? Mathf.Sqrt((float)(sum / data.Length)) : 0f;
+    }
+
+    // --- пропуск хода ------------------------------------------------------
+
+    /// «Пропустить» обязано кончать ход ровно так же, как истёкший таймер:
+    /// без своего состояния, без смерти червя и без остатка времени, из
+    /// которого ход мог бы ожить обратно.
+    static void CheckSkip(GameManager gm)
+    {
+        var worm = gm.ActiveWorm;
+        if (worm == null) { Fail("нет активного червя для пропуска хода"); return; }
+        if (!gm.CanSkipTurn) { Fail("пропуск хода закрыт в прицеливании"); return; }
+
+        string team = gm.Teams[gm.CurrentTeam].Name;
+        gm.SkipTurn();
+
+        if (gm.State != GameState.Settle) Fail($"пропуск не завершил ход: состояние {gm.State}");
+        if (gm.TurnTimeLeft > 0.001f) Fail($"после пропуска на ходу осталось {gm.TurnTimeLeft:0.00} с");
+        if (worm.IsDead) Fail("пропуск хода убил червя");
+
+        Debug.Log($"CONTENT step0: ход команды «{team}» пропущен, состояние {gm.State}");
     }
 
     // --- выбор червя -------------------------------------------------------
@@ -611,6 +677,108 @@ public static class ContentTest
         Debug.Log($"CONTENT step3: телепорт — {before.x:0.0};{before.y:0.0} → {after.x:0.0};{after.y:0.0}, {dist:0.0} юнита");
     }
 
+    // --- мир вокруг боя: мины, бочки, утилитные ящики -----------------------
+
+    static Barrel _barrel;
+    static Mine _wired;
+    static Vector2 _barrelAt;
+    static int _barrelsBefore, _minesBefore;
+
+    /// Расстановка перед боем. Главное здесь не число, а то, что мина не легла
+    /// под ногами: наступивший на неё в первый же ход червь терял бы здоровье
+    /// ни за что.
+    static void CheckScatter(GameManager gm)
+    {
+        int mines = Mine.All.Count;
+        int barrels = Barrel.All.Count;
+        Debug.Log($"CONTENT step1: разбросано мин {mines} (по плану {gm.Config.MineCount}), " +
+                  $"бочек {barrels} (по плану {gm.Config.BarrelCount})");
+
+        if (barrels == 0) Fail("на карте не оказалось ни одной бочки");
+        if (mines == 0) Fail("на карте не оказалось ни одной дикой мины");
+
+        var worms = gm.AllWorms();
+        float closest = float.MaxValue;
+        foreach (var m in Mine.All)
+            foreach (var w in worms)
+                if (m != null && w != null && !w.IsDead)
+                    closest = Mathf.Min(closest, Vector2.Distance(m.transform.position, w.transform.position));
+        if (closest < 3.5f) Fail($"мина легла в {closest:0.0} юнита от червя — под ногами на старте");
+        else Debug.Log($"CONTENT step1: ближайшая мина в {closest:0.0} юнита от червя");
+
+        // Метки содержимого: оружейный ящик не должен раздавать снаряжение,
+        // а утилитный — стволы. Ящики тут же убираем: они падают с неба и
+        // помешали бы проверке ящиков на шаге 6.
+        var ammo = Crate.Drop(CrateKind.Ammo, DestructibleTerrain.WorldWidth * 0.5f);
+        var tool = Crate.Drop(CrateKind.Utility, DestructibleTerrain.WorldWidth * 0.5f);
+        if (ammo != null && Weapon.All[Weapon.IndexOf(ammo.AmmoKind)].Utility)
+            Fail($"в оружейном ящике снаряжение: {ammo.AmmoKind}");
+        if (tool != null && !Weapon.All[Weapon.IndexOf(tool.AmmoKind)].Utility)
+            Fail($"в утилитном ящике оружие: {tool.AmmoKind}");
+        if (ammo != null) Object.Destroy(ammo.gameObject);
+        if (tool != null) Object.Destroy(tool.gameObject);
+        Crate.Forget();
+
+        // Расчищаем карту: дальше червей роняют, топят и телепортируют,
+        // и случайный подрыв смазал бы чужие проверки.
+        foreach (var m in Mine.All.ToArray()) if (m != null) Object.Destroy(m.gameObject);
+        foreach (var b in Barrel.All.ToArray()) if (b != null) Object.Destroy(b.gameObject);
+        Mine.Forget();
+        Barrel.Forget();
+    }
+
+    /// Ставим бочку и рядом с ней мину — подальше от червей, чтобы взрыв
+    /// проверял цепочку, а не добивал команду.
+    static void PlantWorld(GameManager gm)
+    {
+        var worms = gm.AllWorms();
+        var spots = GameManager.SpawnLayout(gm.Terrain, 24, 12345);
+        Vector2 best = Vector2.zero;
+        float bestDist = -1f;
+        foreach (var p in spots)
+        {
+            if (p.y < DestructibleTerrain.WaterLevel + 2f) continue;
+            float d = float.MaxValue;
+            foreach (var w in worms)
+                if (w != null && !w.IsDead) d = Mathf.Min(d, Vector2.Distance(w.transform.position, p));
+            if (d > bestDist) { bestDist = d; best = p; }
+        }
+        if (bestDist < 0f) { Fail("не нашлось места под бочку"); return; }
+
+        _barrelAt = best;
+        _barrel = Barrel.Place(best);
+        _wired = Mine.Scatter(best + new Vector2(2.2f, 0.4f));
+        _barrelsBefore = Barrel.All.Count;
+        _minesBefore = Mine.All.Count;
+
+        // Царапина: одиночная пуля узи бочку вскрывать не должна.
+        _barrel.Hit(5f);
+        if (Barrel.All.Count != _barrelsBefore) Fail("бочка развалилась от одной пули");
+
+        // А взрыв рядом — обязан. Радиус берём небольшой, чтобы мину задело
+        // не им, а самой бочкой: проверяем цепочку, а не один общий взрыв.
+        Combat.Detonate(best + Vector2.up * 1.2f, 1.6f, 30f);
+        if (!Barrel.All.Contains(_barrel)) Fail("бочка рванула мгновенно, без фитиля");
+
+        Debug.Log($"CONTENT step10: бочка в {best.x:0.0};{best.y:0.0}, до ближайшего червя {bestDist:0.0}, " +
+                  $"мин {_minesBefore}, бочек {_barrelsBefore}");
+    }
+
+    /// Через полторы секунды фитиль догорел: бочка обязана рвануть сама,
+    /// проделать воронку и подорвать соседнюю мину цепочкой.
+    static void CheckWorldBlast(GameManager gm)
+    {
+        bool barrelGone = _barrel == null || !Barrel.All.Contains(_barrel);
+        bool mineGone = _wired == null || !Mine.All.Contains(_wired);
+
+        Debug.Log($"CONTENT step11: бочек {_barrelsBefore} → {Barrel.All.Count}, " +
+                  $"мин {_minesBefore} → {Mine.All.Count}");
+
+        if (!barrelGone) Fail("бочка не рванула после фитиля");
+        if (!mineGone) Fail("взрыв бочки не подорвал мину рядом — цепочка не сработала");
+        if (gm.Terrain.IsSolidWorld(_barrelAt)) Fail("взрыв бочки не проделал воронки");
+    }
+
     // --- ящики -------------------------------------------------------------
 
     static void DropCrates(GameManager gm)
@@ -622,7 +790,15 @@ public static class ContentTest
         worm.TakeDamage(40f);
 
         // Аптечка прямо над головой: падает на червя и подбирается сама.
-        Crate.Drop(CrateKind.Health, worm.transform.position.x);
+        // Высоту сброса задаём от самого червя, а не от карты: Crate.DropHeight
+        // считает её от верхней площадки колонки, а карты с фазы 11 многоярусные,
+        // и в пещере червь сплошь и рядом стоит этажом ниже. Тогда ящик ложился
+        // на перекрытие над ним — в прогоне это было 17,6 юнита разницы при
+        // одном и том же x, — и шаг падал через раз, проверяя не подбор, а то,
+        // с каким сводом повезло случайной пещере.
+        _kit = Crate.Drop(CrateKind.Health, worm.transform.position.x);
+        if (_kit != null)
+            _kit.transform.position = worm.transform.position + Vector3.up * 1.6f;
 
         // Второй ящик — подопытный для детонации: подальше от всех червей.
         float x = Mathf.Clamp(worm.transform.position.x + 14f, 6f, DestructibleTerrain.WorldWidth - 6f);
@@ -642,7 +818,16 @@ public static class ContentTest
         else if (worm.Health > 60.5f)
             Debug.Log($"CONTENT step7: аптечка подобрана, здоровье {worm.Health:0}");
         else
-            Fail($"аптечка не подобрана: здоровье {worm.Health:0} (ожидалось больше 60)");
+        {
+            // Где именно она осталась — иначе по «здоровье 60» не отличить
+            // несработавший подбор от ящика, улетевшего на другой ярус.
+            string where = _kit == null
+                ? "ящика на карте нет"
+                : $"ящик в {_kit.transform.position.x:0.0};{_kit.transform.position.y:0.0}, "
+                + $"червь в {worm.transform.position.x:0.0};{worm.transform.position.y:0.0}, "
+                + $"между ними {Vector2.Distance(_kit.transform.position, worm.transform.position):0.0}";
+            Fail($"аптечка не подобрана: здоровье {worm.Health:0} (ожидалось больше 60) — {where}");
+        }
 
         // Ящик мог достаться червю или утонуть — тогда роняем свежий: проверяем
         // детонацию, а не то, доживёт ли подопытный до конца хода.

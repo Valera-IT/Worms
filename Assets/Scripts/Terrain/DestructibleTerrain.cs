@@ -35,6 +35,11 @@ public class DestructibleTerrain : MonoBehaviour
     const int ChunkSamples = ChunkPixels / ColliderStep;
 
     /// Замер по фазам: включается на время бенчмарка, в бою не нужен.
+    /// Куда докладывать о каждом изменении ландшафта. Ставит сетевой хост:
+    /// воронки, коридоры и балки рассылаются клиентам как есть, поэтому карта
+    /// у всех сходится до пикселя, а не «примерно».
+    public static System.Action<TerrainOp> OpSink;
+
     public static bool Profile;
     public static float LastMaskMs, LastPaintMs, LastTexMs, LastColliderMs;
     public static int LastChunksRebuilt, LastDirtyPixels;
@@ -450,6 +455,11 @@ public class DestructibleTerrain : MonoBehaviour
 
     public void Explode(Vector2 worldPos, float worldRadius)
     {
+        // У сетевого клиента своих воронок нет: он рвёт землю только там, где
+        // её порвал хост, — иначе карты разъехались бы за первый же ход.
+        if (NetSim.Mirror) return;
+        OpSink?.Invoke(TerrainOp.Blast(worldPos, worldRadius));
+
         long t0Tick = Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
         int cx = WorldToPixelX(worldPos.x);
@@ -552,6 +562,9 @@ public class DestructibleTerrain : MonoBehaviour
     /// Возвращает true, если хоть один пиксель убран.
     public bool Dig(Vector2 from, Vector2 to, float worldRadius)
     {
+        if (NetSim.Mirror) return false;
+        OpSink?.Invoke(TerrainOp.Dug(from, to, worldRadius));
+
         float ax = from.x * PixelsPerUnit, ay = from.y * PixelsPerUnit;
         float bx = to.x * PixelsPerUnit, by = to.y * PixelsPerUnit;
         float r = worldRadius * PixelsPerUnit;
@@ -609,6 +622,9 @@ public class DestructibleTerrain : MonoBehaviour
     /// Возвращает true, если балка встала.
     public bool StampBeam(Vector2 center, float angleDeg, float length, float thickness, Color32 color)
     {
+        if (NetSim.Mirror) return false;
+        OpSink?.Invoke(TerrainOp.Beam(center, angleDeg, length, thickness, color));
+
         float cx = center.x * PixelsPerUnit, cy = center.y * PixelsPerUnit;
         float half = length * 0.5f * PixelsPerUnit;
         float halfT = thickness * 0.5f * PixelsPerUnit;

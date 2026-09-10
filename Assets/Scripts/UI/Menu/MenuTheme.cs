@@ -359,6 +359,39 @@ static class MenuTheme
         return wrap;
     }
 
+    /// Строка ввода: подпись слева, поле справа. Пока нужна одному экрану —
+    /// адресу хоста в сетевой игре, — но заводится тут, рядом с остальными
+    /// рядами, чтобы поле не выбивалось из вида меню.
+    public static TextField Field(string label, string value, Action<string> onChange, int maxLength = 40)
+    {
+        var f = new TextField(label) { value = value, maxLength = maxLength };
+        f.style.marginTop = 6; f.style.marginBottom = 6;
+        f.style.fontSize = 20;
+
+        var lab = f.labelElement;
+        lab.style.color = Ink;
+        lab.style.fontSize = 20;
+        lab.style.minWidth = 180;
+        lab.style.unityFontStyleAndWeight = FontStyle.Bold;
+
+        var input = f.Q(TextField.textInputUssName);
+        if (input != null)
+        {
+            input.style.backgroundColor = Track;
+            input.style.color = Ink;
+            input.style.height = 52;
+            input.style.paddingLeft = 12; input.style.paddingRight = 12;
+            input.style.borderTopWidth = input.style.borderBottomWidth =
+                input.style.borderLeftWidth = input.style.borderRightWidth = 2;
+            input.style.borderTopColor = input.style.borderBottomColor =
+                input.style.borderLeftColor = input.style.borderRightColor = Edge;
+            Round(input, 4);
+        }
+
+        f.RegisterValueChangedCallback(e => onChange?.Invoke(e.newValue));
+        return f;
+    }
+
     public static Label Note(string s)
     {
         var l = Text(s, 15, InkDim);

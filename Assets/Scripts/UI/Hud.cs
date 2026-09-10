@@ -60,6 +60,8 @@ public class Hud : MonoBehaviour
 
     VisualElement _swapBtn;       // «другой червь» — единственный способ выбрать червя пальцем
     bool _swapShown = true;
+    VisualElement _skipBtn;       // «пропустить ход» — рядом, третьей в том же ряду
+    bool _skipShown = true;
 
     readonly TouchPad _touch = new TouchPad();
 
@@ -162,6 +164,7 @@ public class Hud : MonoBehaviour
         BuildHelp();
         BuildPauseButton();
         BuildSwapButton();
+        BuildSkipButton();
         _touch.Build(_root, _safe);
         BuildGameOver();
     }
@@ -241,6 +244,45 @@ public class Hud : MonoBehaviour
         }
 
         _swapBtn = btn;
+        _safe.Add(btn);
+    }
+
+    /// Кнопка «пропустить ход»: две шеврона, как перемотка. Стоит третьей в
+    /// нижнем ряду справа — пауза, «другой червь», «пропустить», — и видна,
+    /// пока пропускать есть что.
+    void BuildSkipButton()
+    {
+        var btn = HudTheme.Box(HudTheme.Panel);
+        HudTheme.Round(btn, 8);
+        btn.pickingMode = PickingMode.Position;
+        var st = btn.style;
+        st.position = Position.Absolute;
+        st.right = 160; st.bottom = 20;    // тот же шаг 68, что между паузой и сменой червя
+        st.width = 56; st.height = 56;
+        st.alignItems = Align.Center;
+        st.justifyContent = Justify.Center;
+        btn.RegisterCallback<PointerDownEvent>(evt =>
+        {
+            GameInput.RequestSkipTurn();
+            evt.StopPropagation();
+        });
+
+        // Шевроны собраны из полосок по той же причине, что стрелка и пауза:
+        // на глифы шрифта в сборке для устройства полагаться нельзя.
+        for (int c = 0; c < 2; c++)
+            for (int i = 0; i < 2; i++)
+            {
+                var bar = HudTheme.Box(HudTheme.Ink);
+                HudTheme.Round(bar, 2);
+                bar.style.position = Position.Absolute;
+                bar.style.width = 16; bar.style.height = 5;
+                bar.style.left = 10 + c * 17;
+                bar.style.top = i == 0 ? 20 : 30;
+                bar.style.rotate = new Rotate(i == 0 ? 40f : -40f);
+                btn.Add(bar);
+            }
+
+        _skipBtn = btn;
         _safe.Add(btn);
     }
 
@@ -524,6 +566,7 @@ public class Hud : MonoBehaviour
         UpdateWeapons(gm);
         UpdateWeaponPick(gm);
         UpdateSwapButton(gm);
+        UpdateSkipButton(gm);
         UpdateTags(gm);
         UpdateFloaters();
         _touch.Tick(_scheme, gm, _cam);
@@ -574,6 +617,18 @@ public class Hud : MonoBehaviour
         if (show == _swapShown) return;
         _swapShown = show;
         _swapBtn.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+    }
+
+    /// То же правило, что и у смены червя: кнопка на экране ровно тогда, когда
+    /// нажатие что-то сделает.
+    void UpdateSkipButton(GameManager gm)
+    {
+        bool show = gm.CanSkipTurn
+                 && !(App.I != null && App.I.Paused)
+                 && !gm.Teams[gm.CurrentTeam].IsBot;
+        if (show == _skipShown) return;
+        _skipShown = show;
+        _skipBtn.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
     }
 
     void UpdateTeams(GameManager gm)

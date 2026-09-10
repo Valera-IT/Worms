@@ -65,7 +65,10 @@ public class GameManager : MonoBehaviour
     bool _reported;
     int _turnsTaken;
     int _dying;         // сколько червей сейчас прощаются: ход их дожидается
+    bool _conceding;    // идут смерти сдавшейся команды: их урон ничей
     bool _shooterHurt;  // стрелявшего задело его же выстрелом — отход отменяется
+    Worm _shooter;      // кто стрелял в этом ходу: ему и отзываться на итог
+    float _shotDamage;  // сколько он с выстрела снял с чужих червей
     float _waterTarget = float.NaN;   // куда ползёт вода; NaN — стоит на месте
     Water _water;       // тело, кромка и блики: при потопе всё это едет вверх
 
@@ -88,7 +91,7 @@ public class GameManager : MonoBehaviour
         Config = cfg ?? MatchConfig.Hotseat();
         Sfx.Prewarm();
         BotMemory.Clear();
-        _seed = Random.Range(0, 100000);
+        _seed = Config.Seed != 0 ? Config.Seed : Random.Range(0, 100000);
         BuildWorld(_seed);
     }
 
@@ -99,6 +102,8 @@ public class GameManager : MonoBehaviour
         Teams.Clear();
         _projectiles.Clear();
         Crate.Forget();
+        Mine.Forget();
+        Barrel.Forget();
         // Промахи прошлого матча к новой карте отношения не имеют.
         BotMemory.Clear();
         Terrain = null;
@@ -110,6 +115,9 @@ public class GameManager : MonoBehaviour
         Round = 1;
         Flooding = false;
         _dying = 0;
+        _conceding = false;
+        _shooter = null;
+        _shotDamage = 0f;
         _waterTarget = float.NaN;
         State = GameState.Aim;
         _seed = Random.Range(0, 100000);
@@ -146,6 +154,8 @@ public class GameManager : MonoBehaviour
         }
 
         Crate.Forget();
+        Mine.Forget();
+        Barrel.Forget();
 
         // Ландшафт. Тип мира берём из конфига; «Случайный» раскрывается из сида.
         var tGo = new GameObject("Terrain");
@@ -165,7 +175,12 @@ public class GameManager : MonoBehaviour
         // Клички раздаёт мешок из Names: он не повторяется и не кончается —
         // раньше пула на двенадцать имён не хватало на четыре команды по восемь.
         var nameBag = Names.WormBag(seed);
-        var spawnPoints = PickSpawnPoints(teamCount, wormsPerTeam, seed);
+        // Мины и бочки берут точки из той же раскладки, что и черви: она уже
+        // разводит всё, что ставит, «дальше всех от занятого», поэтому просить
+        // у неё больше точек дешевле, чем считать вторую.
+        int wormCount = teamCount * wormsPerTeam;
+        int scatterCount = Config.MineCount + Config.BarrelCount;
+        var spawnPoints = PickSpawnPoints(teamCount, wormsPerTeam, seed, scatterCount);
 
         // Памятники: у каждой команды свой вид из десяти, и они не повторяются —
         // тасуем список видов сидом матча и раздаём по порядку.
@@ -182,7 +197,16 @@ public class GameManager : MonoBehaviour
         for (int t = 0; t < teamCount; t++)
         {
             var setup = Config.Teams[t];
-            var team = new Team { Name = setup.Name, Color = setup.Color, GraveKind = graves[t % graves.Count] };
+            var team = new Team
+            {
+                Name = setup.Name,
+                Color = setup.Color,
+                GraveKind = graves[t % graves.Count],
+                VoiceBank = setup.VoiceBank
+            };
+            // Банк голоса греем сразу: первая же фраза считалась бы в тот кадр,
+            // когда червь выстрелил, а это заметная задержка на телефоне.
+            Voice.Prewarm(team.VoiceBank);
             foreach (var w in Weapon.All) team.Ammo[w.Kind] = Config.AmmoFor(w);
             // Бот-команда приносит свою реализацию IGameInput — червь и очередь
             // ходов не отличают её от человека за клавиатурой.
@@ -201,6 +225,8 @@ public class GameManager : MonoBehaviour
             }
             Teams.Add(team);
         }
+
+        ScatterWorld(spawnPoints, wormCount, seed);
 
         CurrentTeam = 0;
         SelectedWeapon = 0;
@@ -232,8 +258,8 @@ public class GameManager : MonoBehaviour
     /// плиты в воздухе — и разводим червей жадным «дальше всех от уже занятых».
     /// Так команды перемешаны по карте и по этажам, а не сидят двумя кучами
     /// вдоль силуэта, как раньше.
-    List<Vector2> PickSpawnPoints(int teams, int perTeam, int seed)
-        => SpawnLayout(Terrain, teams * perTeam, seed);
+    List<Vector2> PickSpawnPoints(int teams, int perTeam, int seed, int extra = 0)
+        => SpawnLayout(Terrain, teams * perTeam + extra, seed);
 
     /// Та же раскладка отдельно от матча — ею пользуются тесты и снимки миров.
     public static List<Vector2> SpawnLayout(DestructibleTerrain terrain, int need, int seed)
@@ -294,6 +320,50 @@ public class GameManager : MonoBehaviour
         return result;
     }
 
+    /// Мины и бочки на карте: хвост общей раскладки, начиная с точки после
+    /// последнего червя. Точку берём не любую — мина не должна лечь под ногами
+    /// у червя на старте (иначе первый же шаг стоил бы тридцати очков ни за
+    /// что) и не должна лечь вплотную к соседней, иначе весь запас уйдёт
+    /// в одну кучу там, где раскладка развернулась по кругу.
+    void ScatterWorld(List<Vector2> points, int wormCount, int seed)
+    {
+        int mines = Config != null ? Config.MineCount : 0;
+        int barrels = Config != null ? Config.BarrelCount : 0;
+        if (mines + barrels <= 0) return;
+
+        // Черви уже стоят на своих точках, но брать их из Teams надёжнее, чем
+        // из списка: часть точек могла не достаться никому.
+        var worms = AllWorms();
+        var taken = new List<Vector2>();
+
+        int placedMines = 0, placedBarrels = 0;
+        for (int i = wormCount; i < points.Count; i++)
+        {
+            var p = points[i];
+            if (p.y < DestructibleTerrain.WaterLevel + 1f) continue;
+
+            bool tooClose = false;
+            for (int k = 0; k < worms.Count && !tooClose; k++)
+                if (worms[k] != null && Vector2.Distance(worms[k].transform.position, p) < WildSafeRange)
+                    tooClose = true;
+            for (int k = 0; k < taken.Count && !tooClose; k++)
+                if (Vector2.Distance(taken[k], p) < 2.5f) tooClose = true;
+            if (tooClose) continue;
+
+            // Бочки ставим первыми: их меньше, и лучше отдать им точки
+            // получше, чем оставить пять бочек в одном углу.
+            if (placedBarrels < barrels) { Barrel.Place(p); placedBarrels++; }
+            else if (placedMines < mines) { Mine.Scatter(p + Vector2.up * 0.3f); placedMines++; }
+            else break;
+
+            taken.Add(p);
+        }
+    }
+
+    /// Ближе этого к червю дикая мина не ложится: радиус срабатывания 1,6,
+    /// и запас нужен на то, что червь ещё и сползёт по склону, пока встаёт.
+    const float WildSafeRange = 4.5f;
+
     public List<Worm> AllWorms()
     {
         var list = new List<Worm>();
@@ -327,6 +397,10 @@ public class GameManager : MonoBehaviour
         // Оружие с закончившимися патронами не оставляем выбранным.
         if (!HasAmmo(SelectedWeapon)) SelectWeapon(0);
 
+        // Реплика прошлого хода не должна доиграться в этом: сказанное чужим
+        // червём звучит так, будто говорит тот, кто только что вышел.
+        Voice.Hush();
+
         ActiveWorm.BeginTurn();
         Cam.Follow(ActiveWorm.transform);
         State = GameState.Aim;
@@ -342,7 +416,11 @@ public class GameManager : MonoBehaviour
         if (chance <= 0f || Random.value > chance) return;
         // Больше четырёх ящиков на карте — это уже свалка, а не подарок.
         if (Crate.All.Count >= 4) return;
-        Crate.DropRandom(Terrain);
+        var crate = Crate.DropRandom(Terrain);
+        // Сброс — бросок случайных чисел, повторить его у клиента нечем:
+        // хост объявляет упавший ящик отдельным сообщением.
+        if (crate != null && NetGame.I != null && NetGame.I.Match != null)
+            NetGame.I.Match.SendCrateDrop(crate.Kind, crate.transform.position.x);
     }
 
     public bool HasAmmo(int weaponIndex)
@@ -404,6 +482,54 @@ public class GameManager : MonoBehaviour
         return true;
     }
 
+    /// Можно ли прямо сейчас пропустить ход. Окно шире, чем у выбора червя:
+    /// пропустить не грех и после того, как походил, — в оригинале «пропустить»
+    /// как раз и означает «мне тут делать нечего».
+    public bool CanSkipTurn =>
+        (State == GameState.Aim || State == GameState.Retreat)
+        && ActiveWorm != null && !ActiveWorm.IsDead && !NetSim.Mirror;
+
+    /// Пропустить ход. Отдельного состояния не заводим: это ровно то же, что
+    /// истёкший таймер, — червь замирает, мир успокаивается, ход уходит дальше.
+    public void SkipTurn()
+    {
+        if (!CanSkipTurn) return;
+        TurnTimeLeft = 0f;
+        EnterSettle(0.4f);
+    }
+
+    /// Можно ли сдаться: в сетевом матче решение о смерти принимает хост,
+    /// а бот за себя не сдаётся — сдаётся человек за устройством.
+    public bool CanSurrender =>
+        State != GameState.GameOver && !NetSim.Mirror
+        && CurrentTeam >= 0 && CurrentTeam < Teams.Count && !Teams[CurrentTeam].IsBot;
+
+    /// Команда уходит с карты. Черви гибнут тем же путём, что и последний червь
+    /// команды в бою, — с прощанием, взрывом и памятником, — поэтому итоги
+    /// считает всё та же CheckGameOver и никакой отдельной ветки «сдался» в них
+    /// нет. Разница ровно одна: урон сдачи никому не записывается (Worm.Concede).
+    public void Surrender(int team)
+    {
+        if (team < 0 || team >= Teams.Count) return;
+        if (State == GameState.GameOver) return;
+
+        var t = Teams[team];
+        _conceding = true;
+        for (int i = 0; i < t.Worms.Count; i++)
+        {
+            var w = t.Worms[i];
+            if (w != null && !w.IsDead) w.Concede();
+        }
+
+        // Сдаваться было некому — снимаем метку сразу, иначе она залипнет.
+        if (_dying == 0) _conceding = false;
+
+        // Сдалась команда, чей сейчас ход, — ход обрывается прямо здесь.
+        // Сдалась чужая — свой ход текущая команда доигрывает, а матч сойдётся
+        // на ближайшей передаче хода: CheckGameOver считает живые команды.
+        if (team == CurrentTeam && State != GameState.Settle) EnterSettle(0.6f);
+    }
+
     public void SelectWeapon(int index)
     {
         if (index < 0 || index >= Weapon.All.Length) return;
@@ -432,6 +558,12 @@ public class GameManager : MonoBehaviour
         // Отход считаем от выстрела: всё, что прилетит червю после этого мига,
         // отменит ему побег.
         _shooterHurt = false;
+
+        // Червь отзывается на свой выстрел, а итог — попал или промазал —
+        // объявит уже в конце хода, когда всё отгремело.
+        _shooter = ActiveWorm;
+        _shotDamage = 0f;
+        Voice.Say(ActiveWorm, Voice.Line.Fire);
 
         // Мину и динамит червь кладёт себе под ноги — смотреть на полёт нечего,
         // и бежать надо прямо сейчас, пока горит фитиль. Овца и супер-овца —
@@ -488,7 +620,12 @@ public class GameManager : MonoBehaviour
     /// успокоившимся и ход не передаётся — иначе прощание доигрывалось бы уже
     /// в чужом ходу, а памятник вставал под ногами следующего червя.
     public void BeginDeathAnim() => _dying++;
-    public void EndDeathAnim() => _dying = Mathf.Max(0, _dying - 1);
+    public void EndDeathAnim()
+    {
+        _dying = Mathf.Max(0, _dying - 1);
+        // Последний сдавшийся червь догорел — дальше урон снова боевой.
+        if (_dying == 0) _conceding = false;
+    }
 
     /// Урон записываем на команду, чей сейчас ход, — для статистики на экране итогов.
     public void RegisterDamage(Worm victim, float dmg)
@@ -496,13 +633,31 @@ public class GameManager : MonoBehaviour
         if (dmg <= 0f) return;
         // Своим же взрывом (или водой) стрелявшего задело — прятаться он не пойдёт.
         if (victim != null && victim == ActiveWorm) _shooterHurt = true;
+        // Взрывы червей, ушедших с карты по сдаче, никому в заслугу не идут:
+        // Worm.Concede обходит TakeDamage, но осколки его смерти — нет.
+        if (_conceding) return;
         if (CurrentTeam >= 0 && CurrentTeam < Teams.Count)
             Teams[CurrentTeam].DamageDealt += dmg;
+
+        // Попаданием считаем только чужого червя: подорвать себя или соседа
+        // по команде — не то, чем хвастаются.
+        if (_shooter != null && victim != null && victim.Team != Teams[CurrentTeam])
+            _shotDamage += dmg;
     }
 
     void Update()
     {
         FloodTick();
+
+        // Сетевой клиент ход не ведёт: чей ход, сколько осталось и что
+        // случилось — всё это ему присылает хост. Здесь остаётся только
+        // отсчёт времени, чтобы плашка хода не стояла между сообщениями.
+        if (NetSim.Mirror)
+        {
+            if (State == GameState.Aim || State == GameState.Projectile || State == GameState.Retreat)
+                TurnTimeLeft = Mathf.Max(0f, TurnTimeLeft - Time.deltaTime);
+            return;
+        }
 
         switch (State)
         {
@@ -544,6 +699,42 @@ public class GameManager : MonoBehaviour
         }
     }
 
+    /// Принять ход, назначенный хостом. Клиент сам ходы не переключает:
+    /// иначе два устройства решали бы это независимо и рано или поздно
+    /// разошлись бы в том, чей сейчас червь, — а это худший вид расхождения,
+    /// потому что виден он не сразу.
+    public void ApplyRemoteTurn(int team, int wormIndex, GameState state, int round,
+                                float wind, float timeLeft, int weapon, float water)
+    {
+        if (Teams.Count == 0) return;
+
+        DestructibleTerrain.SetWaterLevel(water);
+        LayoutWater();
+
+        Wind = wind;
+        Round = Mathf.Max(1, round);
+        TurnTimeLeft = timeLeft;
+        if (weapon >= 0 && weapon < Weapon.All.Length) SelectedWeapon = weapon;
+
+        CurrentTeam = Mathf.Clamp(team, 0, Teams.Count - 1);
+        var current = Teams[CurrentTeam];
+        Worm next = wormIndex >= 0 && wormIndex < current.Worms.Count ? current.Worms[wormIndex] : null;
+
+        if (next != ActiveWorm)
+        {
+            if (wormIndex >= 0) current.ActiveIndex = wormIndex;
+            ActiveWorm = next;
+            if (ActiveWorm != null && !ActiveWorm.IsDead)
+            {
+                ActiveWorm.BeginTurn();
+                Cam.Follow(ActiveWorm.transform);
+                Sfx.TurnStart();
+            }
+        }
+
+        State = state;
+    }
+
     /// Вода доходит до новой отметки не мгновенно, а за доли секунды: так видно,
     /// как её кромка накрывает червя, и он успевает начать тонуть.
     void FloodTick()
@@ -578,6 +769,24 @@ public class GameManager : MonoBehaviour
         _settleTimer = delay;
         // Досматривать чужой ход, вися на верёвке, нельзя: она держит только своего.
         if (ActiveWorm != null) ActiveWorm.ReleaseRope();
+        SayShotVerdict();
+    }
+
+    /// Итог выстрела голосом стрелявшего. Место выбрано в конце хода, а не
+    /// сразу после взрыва: динамит и мина рвутся уже в отходе, и объявленный
+    /// раньше промах через секунду оказался бы попаданием. Ход дожидается
+    /// реплики — иначе Hush на старте следующего срежет её на полуслове.
+    void SayShotVerdict()
+    {
+        if (_shooter == null) return;
+        var shooter = _shooter;
+        float damage = _shotDamage;
+        _shooter = null;
+        _shotDamage = 0f;
+
+        if (shooter.IsDead) return;   // мёртвый уже попрощался, добавить ему нечего
+        float wait = Voice.Say(shooter, damage > 0f ? Voice.Line.Hit : Voice.Line.Miss);
+        _settleTimer = Mathf.Max(_settleTimer, wait);
     }
 
     bool WorldIsCalm()

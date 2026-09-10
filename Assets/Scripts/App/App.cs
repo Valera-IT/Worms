@@ -148,6 +148,18 @@ public class App : MonoBehaviour
 
     public void ResumeFromPause() => TogglePause();
 
+    /// «Сдаться» из паузы. Паузу снимаем до того, как команда уходит с карты:
+    /// прощание, взрывы и памятники идут корутинами по Time.deltaTime, а на
+    /// паузе время стоит — матч замер бы на полусдаче.
+    public void Surrender()
+    {
+        if (Phase != AppPhase.Match || Match == null) return;
+        if (!Match.CanSurrender) return;
+        SetPaused(false);
+        _menu.HideAll();
+        Match.Surrender(Match.CurrentTeam);
+    }
+
     public void QuitGame()
     {
 #if UNITY_EDITOR
@@ -167,6 +179,9 @@ public class App : MonoBehaviour
 
     void TeardownMatch()
     {
+        // Реплика червя переживает снос мира: источник звука общий и лежит
+        // вне матча. В меню голос из только что закрытого боя ни к чему.
+        Voice.Hush();
         if (Match != null)
         {
             Destroy(Match.gameObject);

@@ -10,7 +10,7 @@ public static class Sfx
     public enum Sound
     {
         Shot, Shotgun, Explosion, Splash, Step, Jump, Bounce, Thud,
-        CrateDrop, Pickup, RopeShot, RopeHit, Teleport, TurnStart, Flood, Bye,
+        CrateDrop, Pickup, RopeShot, RopeHit, Teleport, TurnStart, Flood,
         Drill
     }
 
@@ -42,7 +42,6 @@ public static class Sfx
     public static void Teleport() => Play(Sound.Teleport, 0.8f);
     public static void TurnStart() => Play(Sound.TurnStart, 0.45f);
     public static void Flood() => Play(Sound.Flood, 0.9f);
-    public static void Bye() => Play(Sound.Bye, 0.7f, Random.Range(0.92f, 1.12f));
 
     /// Взрыв: чем крупнее воронка, тем ниже и длиннее. Один клип, разный pitch —
     /// синтезировать по клипу на калибр было бы расточительством ради того же эффекта.
@@ -133,7 +132,6 @@ public static class Sfx
         Sound.RopeHit => MakeRopeHit(),
         Sound.Teleport => MakeTeleport(),
         Sound.TurnStart => MakeTurnStart(),
-        Sound.Bye => MakeBye(),
         _ => MakeFlood()
     };
 
@@ -315,20 +313,6 @@ public static class Sfx
     {
         var osc = new Synth.Osc();
         return Synth.Build("sfx_turn", 0.22f, t => osc.Sin(880f) * Synth.Env(t, 0.01f, 0.05f));
-    }
-
-    /// Прощание червя: три ноты вниз, будто «ну-и-всё». Голоса в проекте нет,
-    /// а короткая нисходящая фраза читается как реплика, а не как сигнал.
-    static AudioClip MakeBye()
-    {
-        var osc = new Synth.Osc();
-        return Synth.Build("sfx_bye", 0.5f, t =>
-        {
-            int step = Mathf.Clamp(Mathf.FloorToInt(t / 0.14f), 0, 2);
-            float f = step == 0 ? 700f : step == 1 ? 560f : 420f;
-            // Лёгкое вибрато — от него нота звучит голосом, а не пищалкой.
-            return osc.Sin(f * (1f + Mathf.Sin(t * 42f) * 0.03f)) * Synth.Env(t - step * 0.14f, 0.008f, 0.09f);
-        });
     }
 
     /// Потоп: низкий гудок с биением — сирена, а не бип.

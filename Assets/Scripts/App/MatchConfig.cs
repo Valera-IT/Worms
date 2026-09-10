@@ -15,12 +15,20 @@ public enum AmmoPlan { Standard, Generous, Unlimited }
 /// Как часто с неба падают ящики с припасами.
 public enum CratePlan { Off, Rare, Normal, Plenty }
 
+/// Сколько мин и бочек с нефтью лежит на карте с самого начала боя.
+public enum ScatterPlan { Off, Few, Normal, Many }
+
 /// Одна команда в конфигурации матча.
 public class TeamSetup
 {
     public string Name;
     public Color Color;
     public bool IsBot;   // командой правит BotInput, а не человек за устройством
+
+    /// Каким голосом говорят черви команды: номер банка в Voice. Раздаётся
+    /// по порядку команд — банков ровно столько же, сколько команд бывает
+    /// в матче, поэтому двух одинаковых голосов в бою не встретится.
+    public int VoiceBank;
 }
 
 /// Всё, что раньше было константами и захардкоженными списками в GameManager:
@@ -35,10 +43,20 @@ public class MatchConfig
     public AmmoPlan Ammo = AmmoPlan.Standard;
     public CratePlan Crates = CratePlan.Normal;
 
+    /// Мины и бочки, разбросанные по карте до первого хода. Держим одной
+    /// настройкой: и то и другое — опасность самой карты, а не арсенала,
+    /// и разводить их по двум строкам меню значит спрашивать об одном дважды.
+    public ScatterPlan Scatter = ScatterPlan.Normal;
+
     /// С какого раунда начинается потоп: вода прибывает каждый ход и черви
     /// внизу тонут. 0 — выключено. Раньше здесь была внезапная смерть, которая
     /// срезала всем здоровье до единицы, — вода делает то же самое честнее.
     public int FloodRound = 1;
+
+    /// Сид мира. 0 — взять случайный при старте, как было всегда. Сетевой
+    /// матч проставляет сюда число хоста: карта строится у каждого своя, но
+    /// из одного сида — гонять по проводу мегабайт маски незачем.
+    public int Seed;
 
     public List<TeamSetup> Teams = new List<TeamSetup>();
 
@@ -93,6 +111,25 @@ public class MatchConfig
         _ => 0.38f
     };
 
+    /// Сколько диких мин раскидать по карте перед боем.
+    public int MineCount => Scatter switch
+    {
+        ScatterPlan.Off => 0,
+        ScatterPlan.Few => 3,
+        ScatterPlan.Many => 12,
+        _ => 6
+    };
+
+    /// Сколько бочек с нефтью поставить. Их всегда меньше, чем мин: бочка
+    /// видна издалека и работает как позиция, а не как ловушка.
+    public int BarrelCount => Scatter switch
+    {
+        ScatterPlan.Off => 0,
+        ScatterPlan.Few => 2,
+        ScatterPlan.Many => 7,
+        _ => 4
+    };
+
     /// Приводит число команд к n (2..4), сохраняя уже настроенные и добавляя
     /// стандартные. Флаг бота у добавленных выставляет вызывающий.
     public void SetTeamCount(int n)
@@ -107,7 +144,13 @@ public class MatchConfig
         while (Teams.Count < n)
         {
             int i = Teams.Count;
-            Teams.Add(new TeamSetup { Name = FreshTeamName(), Color = Palette[i], IsBot = false });
+            Teams.Add(new TeamSetup
+            {
+                Name = FreshTeamName(),
+                Color = Palette[i],
+                IsBot = false,
+                VoiceBank = i % Voice.BankCount
+            });
         }
         SetBotCount(bots);
     }
@@ -136,11 +179,12 @@ public class MatchConfig
             Terrain = Terrain,
             Ammo = Ammo,
             Crates = Crates,
+            Scatter = Scatter,
             FloodRound = FloodRound,
             Teams = new List<TeamSetup>()
         };
         foreach (var t in Teams)
-            c.Teams.Add(new TeamSetup { Name = t.Name, Color = t.Color, IsBot = t.IsBot });
+            c.Teams.Add(new TeamSetup { Name = t.Name, Color = t.Color, IsBot = t.IsBot, VoiceBank = t.VoiceBank });
         return c;
     }
 

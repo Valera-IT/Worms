@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// Общая логика взрыва: воронка в ландшафте, урон и отбрасывание червей,
-/// детонация задетых ящиков.
+/// детонация задетых ящиков, мин и бочек.
 public static class Combat
 {
     /// Ящики, попавшие под взрыв, собираем сюда и рвём после основного цикла:
@@ -46,6 +46,27 @@ public static class Combat
             dir = (dir + Vector2.up * 0.35f).normalized;
             w.Knockback(dir * (6f + dmg * 0.32f));
             w.TakeDamage(dmg);
+        }
+
+        // Мины и бочки — до ящиков: они не рвутся сразу, а получают отсчёт,
+        // поэтому в рекурсию их обход не уходит и копия списка не нужна.
+        for (int i = 0; i < Mine.All.Count; i++)
+        {
+            var m = Mine.All[i];
+            if (m == null) continue;
+            if (Vector2.Distance(m.transform.position, pos) <= radius + 0.5f) m.Chain();
+        }
+        for (int i = 0; i < Barrel.All.Count; i++)
+        {
+            var b = Barrel.All[i];
+            if (b == null) continue;
+            Vector2 bp = b.transform.position;
+            float bd = Vector2.Distance(bp, pos);
+            float range = radius + 0.6f;
+            if (bd > range) continue;
+            // Железо считаем тем же уроном, что и червя: дальний край взрыва
+            // бочку не вскрывает, прямое попадание вскрывает наверняка.
+            b.Hit(damage * (1f - Mathf.Clamp01(bd / range)));
         }
 
         _chain.Clear();

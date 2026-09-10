@@ -2,9 +2,10 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 
-/// Гоняет стейт-машину App без человека: Меню → Матч → Пауза → Матч → Итоги → Меню.
+/// Гоняет стейт-машину App без человека: Меню → Матч → Пауза → Сдача → Итоги → Меню.
 /// Проверяет, что мир поднимается и сносится в нужные моменты, что пауза
-/// останавливает время и что смена мира идёт через затемнение (13f). Запуск: Unity -executeMethod MenuTest.Run
+/// останавливает время, что смена мира идёт через затемнение (13f) и что
+/// сдача команды доводит матч до экрана итогов, ничего не приписав сопернику. Запуск: Unity -executeMethod MenuTest.Run
 public static class MenuTest
 {
     const string Flag = "MenuTest.Running";
@@ -47,12 +48,17 @@ public static class MenuTest
         else if (EditorApplication.isPlaying) EditorApplication.ExitPlaymode();
     }
 
-    static void KillTeam(int t)
+    /// Команда сдаётся. Это же и есть проверка шага 14d: сдача обязана пройти
+    /// тем же путём, что гибель последнего червя, — до экрана итогов, — и не
+    /// записать сопернику ни единицы урона за то, чего он не делал.
+    static void Surrender(int t)
     {
         var gm = GameManager.I;
-        foreach (var w in gm.Teams[t].Worms)
-            if (w != null && !w.IsDead) w.TakeDamage(999f);
+        _damageBefore = gm.Teams[1 - t].DamageDealt;
+        gm.Surrender(t);
     }
+
+    static float _damageBefore;
 
     static void Tick()
     {
@@ -126,8 +132,8 @@ public static class MenuTest
             app.TogglePause();
             Debug.Log($"MENU step3: снятие паузы paused={app.Paused} timeScale={Time.timeScale}");
             if (app.Paused || Time.timeScale != 1f) Fail("время не возобновилось");
-            KillTeam(1);
-            Debug.Log("MENU step3: команда 1 уничтожена, ждём экран итогов");
+            Surrender(1);
+            Debug.Log("MENU step3: команда 1 сдалась, ждём экран итогов");
         }
 
         if (_step == 3 && app.Phase == AppPhase.Results)
@@ -136,6 +142,14 @@ public static class MenuTest
             var r = app.LastResults;
             Debug.Log($"MENU step4: итоги, winner={(r != null ? r.WinnerTeam : -99)} title={r?.Title}");
             if (r == null || r.WinnerTeam != 0) Fail("победителем должна быть команда 0");
+            // Сдавшаяся команда ушла с карты целиком, а победителю её черви
+            // в урон не записались: TakeDamage сдача не трогает.
+            if (r != null && r.Teams.Count > 1)
+            {
+                if (r.Teams[1].WormsAlive != 0) Fail($"у сдавшейся команды осталось червей: {r.Teams[1].WormsAlive}");
+                if (r.Teams[0].DamageDealt > _damageBefore + 0.001f)
+                    Fail($"сдача записалась победителю в урон: {_damageBefore:0.0} → {r.Teams[0].DamageDealt:0.0}");
+            }
             if (GameManager.I == null) Fail("застывший мир должен ещё стоять фоном под итогами");
             if (Hud.I != null) Fail("HUD на экране итогов должен быть снят");
 

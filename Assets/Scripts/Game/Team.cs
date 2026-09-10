@@ -9,6 +9,9 @@ public class Team
     public int ActiveIndex;
     public Dictionary<WeaponKind, int> Ammo = new Dictionary<WeaponKind, int>();
 
+    /// Банк голоса команды: им говорят все её черви. Приходит из TeamSetup.
+    public int VoiceBank;
+
     /// Вид памятника, который остаётся от погибших червей этой команды:
     /// один из десяти, у каждой команды свой. Раздаёт GameManager при сборке мира.
     public int GraveKind;
